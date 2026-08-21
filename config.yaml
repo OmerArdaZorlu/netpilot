@@ -1,0 +1,45 @@
+# Network Traffic Controller - ana yapılandırma
+# Bu dosyadaki her alanın koddaki bir varsayılanı var; sadece değiştirmek
+# istediklerini burada tut.
+
+mode: simulation          # simulation | live   (live faz 2'de açılacak)
+
+link:
+  downlink_mbps: 200      # WAN indirme kapasitesi
+  uplink_mbps: 20         # WAN yükleme kapasitesi
+  congestion_threshold: 0.80   # bu oranın üstü "tıkanma" sayılır
+  critical_threshold: 0.94     # bu oranın üstü "kritik"
+
+collector:
+  tick_seconds: 1.0       # simülatörün kaç saniyede bir akış üreteceği
+  window_seconds: 60      # metrik penceresi
+
+optimizer:
+  enabled: true
+  interval_seconds: 5
+  auto_apply: false       # true ise öneriler otomatik "uygulandı" işaretlenir
+  hog_share_threshold: 0.35    # tek cihaz toplam bandın %35'ini aşarsa hog
+  min_confidence_to_apply: 0.7
+
+ai:
+  provider: auto          # auto | foundry | ollama | mock
+  model: phi-4-mini       # foundry model download phi-4-mini
+  base_url: ""            # boş = Foundry Local ucu otomatik keşfedilir
+  temperature: 0.2
+  timeout_seconds: 120
+  # Ollama geliştirme yedeği (model adlandırması Foundry'den farklı)
+  ollama_base_url: http://127.0.0.1:11434
+  ollama_model: phi4-mini
+  analysis_interval_seconds: 30   # AI analistin çalışma sıklığı
+  max_snapshot_flows: 25
+
+api:
+  host: 127.0.0.1
+  port: 8080
+
+storage:
+  path: data/ntc.db
+  retain_hours: 24
+
+logging:
+  level: INFO

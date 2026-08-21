@@ -1,0 +1,805 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Network Traffic Controller</title>
+<style>
+:root {
+  color-scheme: light;
+  --plane:        #f9f9f7;
+  --surface:      #fcfcfb;
+  --ink:          #0b0b0b;
+  --ink-2:        #52514e;
+  --muted:        #898781;
+  --grid:         #e1e0d9;
+  --axis:         #c3c2b7;
+  --ring:         rgba(11,11,11,0.10);
+
+  --s1: #2a78d6;  /* realtime   */
+  --s2: #eb6834;  /* interactive*/
+  --s3: #1baf7a;  /* streaming  */
+  --s4: #eda100;  /* bulk       */
+  --s5: #e87ba4;  /* background */
+
+  --good:     #0ca30c;
+  --warning:  #fab219;
+  --serious:  #ec835a;
+  --critical: #d03b3b;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --plane: #0d0d0d; --surface: #1a1a19; --ink: #ffffff; --ink-2: #c3c2b7;
+    --muted: #898781; --grid: #2c2c2a; --axis: #383835;
+    --ring: rgba(255,255,255,0.10);
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --plane: #0d0d0d; --surface: #1a1a19; --ink: #ffffff; --ink-2: #c3c2b7;
+  --muted: #898781; --grid: #2c2c2a; --axis: #383835;
+  --ring: rgba(255,255,255,0.10);
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--plane); color: var(--ink);
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+a { color: inherit; }
+h1, h2, h3 { margin: 0; font-weight: 600; }
+
+/* ---------------------------------------------------------------- layout */
+header {
+  display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  padding: 16px 24px; border-bottom: 1px solid var(--ring);
+  background: var(--surface); position: sticky; top: 0; z-index: 10;
+}
+header h1 { font-size: 15px; letter-spacing: .01em; }
+.spacer { flex: 1; }
+main { padding: 20px 24px 48px; display: grid; gap: 16px; max-width: 1600px; }
+.grid { display: grid; gap: 16px; }
+@media (min-width: 1000px) { .cols-2 { grid-template-columns: 3fr 2fr; } }
+@media (min-width: 1240px) { .cols-3 { grid-template-columns: 1fr 1fr 1fr; } }
+
+.card {
+  background: var(--surface); border: 1px solid var(--ring);
+  border-radius: 10px; padding: 16px 18px; min-width: 0;
+}
+.card > header {
+  all: unset; display: flex; align-items: baseline; gap: 10px;
+  margin-bottom: 14px;
+}
+.card h2 { font-size: 13px; letter-spacing: .02em; }
+.card .sub { color: var(--muted); font-size: 12px; }
+
+/* ------------------------------------------------------------ stat tiles */
+.tiles { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+.tile { background: var(--surface); border: 1px solid var(--ring); border-radius: 10px; padding: 14px 16px; }
+.tile .label { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.tile .value { font-size: 30px; line-height: 1.15; margin-top: 6px; }
+.tile .value small { font-size: 14px; color: var(--ink-2); margin-left: 3px; }
+.tile .note { font-size: 12px; color: var(--ink-2); margin-top: 4px; }
+
+/* --------------------------------------------------------------- meters */
+.meter { margin-bottom: 14px; }
+.meter:last-child { margin-bottom: 0; }
+.meter-head { display: flex; justify-content: space-between; font-size: 12px; color: var(--ink-2); margin-bottom: 6px; }
+.meter-head b { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+.meter-track { position: relative; height: 8px; border-radius: 4px; background: var(--grid); overflow: hidden; }
+.meter-fill { height: 100%; border-radius: 4px; transition: width .4s ease, background .4s ease; }
+.meter-mark { position: absolute; top: -3px; width: 1px; height: 14px; background: var(--axis); }
+
+/* -------------------------------------------------------------- legend */
+.legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12px; color: var(--ink-2); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.swatch { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+
+/* ---------------------------------------------------------- class bars */
+.classrow { display: grid; grid-template-columns: 96px 1fr 78px; align-items: center; gap: 10px; margin-bottom: 9px; font-size: 12px; }
+.classrow:last-child { margin-bottom: 0; }
+.classrow .name { color: var(--ink-2); }
+.classrow .track { height: 10px; background: var(--grid); border-radius: 4px; overflow: hidden; }
+.classrow .bar { height: 100%; border-radius: 4px; transition: width .4s ease; }
+.classrow .val { text-align: right; font-variant-numeric: tabular-nums; color: var(--ink); }
+
+/* ------------------------------------------------------------- tables */
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { text-align: left; font-weight: 500; color: var(--muted); font-size: 11px;
+     text-transform: uppercase; letter-spacing: .05em; padding: 0 8px 8px 0; }
+td { padding: 7px 8px 7px 0; border-top: 1px solid var(--grid); font-variant-numeric: tabular-nums; }
+td.name { font-variant-numeric: normal; }
+.scroll { overflow-x: auto; }
+
+/* -------------------------------------------------------------- feeds */
+.feed { display: grid; gap: 10px; max-height: 340px; overflow-y: auto; }
+.item { display: grid; grid-template-columns: auto 1fr; gap: 10px; padding-bottom: 10px; border-bottom: 1px solid var(--grid); }
+.item:last-child { border-bottom: 0; padding-bottom: 0; }
+.item .body { min-width: 0; }
+.item .title { font-size: 13px; font-weight: 600; }
+.item .detail { font-size: 12px; color: var(--ink-2); margin-top: 2px; overflow-wrap: anywhere; }
+.item .when { font-size: 11px; color: var(--muted); margin-top: 3px; font-variant-numeric: tabular-nums; }
+.dot { width: 9px; height: 9px; border-radius: 50%; margin-top: 6px; flex: none; }
+
+.badge { display: inline-flex; align-items: center; gap: 5px; font-size: 11px;
+         padding: 2px 8px; border-radius: 999px; border: 1px solid var(--ring);
+         color: var(--ink-2); white-space: nowrap; }
+.badge.on { color: var(--ink); border-color: var(--axis); }
+
+button {
+  font: inherit; font-size: 12px; padding: 5px 11px; border-radius: 7px;
+  border: 1px solid var(--ring); background: var(--surface); color: var(--ink);
+  cursor: pointer;
+}
+button:hover { border-color: var(--axis); }
+button.primary { background: var(--s1); border-color: var(--s1); color: #fff; }
+button:disabled { opacity: .45; cursor: default; }
+.btnrow { display: flex; flex-wrap: wrap; gap: 8px; }
+
+input[type=text] {
+  font: inherit; font-size: 13px; padding: 7px 10px; border-radius: 7px;
+  border: 1px solid var(--ring); background: var(--plane); color: var(--ink);
+  width: 100%;
+}
+
+/* --------------------------------------------------------------- chart */
+.chart-wrap { position: relative; }
+svg text { fill: var(--muted); font-size: 10px; }
+.tooltip {
+  position: absolute; pointer-events: none; opacity: 0; transition: opacity .12s;
+  background: var(--surface); border: 1px solid var(--axis); border-radius: 8px;
+  padding: 8px 10px; font-size: 12px; box-shadow: 0 4px 14px rgba(0,0,0,.14);
+  white-space: nowrap; z-index: 5;
+}
+.tooltip .tt-row { display: flex; align-items: center; gap: 7px; margin-top: 3px; }
+.tooltip .tt-row b { font-variant-numeric: tabular-nums; }
+.muted { color: var(--muted); }
+.empty { color: var(--muted); font-size: 12px; padding: 6px 0; }
+.ai-summary { font-size: 14px; line-height: 1.6; }
+.pill-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.conf { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 11px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Network Traffic Controller</h1>
+  <span class="badge" id="mode-badge">—</span>
+  <span class="badge" id="ai-badge">model: —</span>
+  <span class="badge" id="conn-badge">bağlanıyor…</span>
+  <span class="spacer"></span>
+  <button id="theme-toggle">Tema</button>
+</header>
+
+<main>
+
+  <section class="tiles" id="tiles"></section>
+
+  <section class="grid cols-2">
+    <div class="card">
+      <header>
+        <h2>Verimlilik — indirme / yükleme</h2>
+        <span class="sub" id="chart-sub"></span>
+      </header>
+      <div class="legend" style="margin-bottom:10px">
+        <span><i class="swatch" style="background:var(--s1)"></i>İndirme (Mbps)</span>
+        <span><i class="swatch" style="background:var(--s2)"></i>Yükleme (Mbps)</span>
+        <span><i class="swatch" style="background:var(--axis);height:2px;border-radius:0"></i>İndirme kapasitesi</span>
+      </div>
+      <div class="chart-wrap" id="chart-wrap">
+        <svg id="chart" height="220" width="100%" role="img"
+             aria-label="Zaman içinde indirme ve yükleme hızı"></svg>
+        <div class="tooltip" id="chart-tip"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <header><h2>Hat doluluğu</h2><span class="sub">eşik: %80 / %94</span></header>
+      <div id="meters"></div>
+      <header style="margin-top:22px"><h2>Trafik sınıfı dağılımı</h2></header>
+      <div id="classbars"></div>
+    </div>
+  </section>
+
+  <section class="grid cols-2">
+    <div class="card">
+      <header><h2>Cihazlar</h2><span class="sub" id="dev-sub"></span></header>
+      <div class="scroll">
+        <table id="devices">
+          <thead><tr>
+            <th>Cihaz</th><th>Tür</th><th>WAN ind.</th><th>WAN yük.</th><th>LAN içi</th>
+            <th>Akış</th><th>RTT</th><th>Baskın uygulama</th><th>Politika</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <header><h2>Uyarılar</h2><span class="sub" id="alert-sub"></span></header>
+      <div class="feed" id="alerts"></div>
+    </div>
+  </section>
+
+  <section class="grid cols-2">
+    <div class="card">
+      <header>
+        <h2>AI analisti</h2>
+        <span class="sub" id="ai-sub"></span>
+        <span class="spacer"></span>
+        <button id="analyze-btn">Şimdi analiz et</button>
+      </header>
+      <div id="ai-panel"><p class="empty">İlk analiz bekleniyor…</p></div>
+      <div style="margin-top:16px; display:flex; gap:8px">
+        <input type="text" id="ask-input" placeholder="Ağa dair bir şey sor: “en çok bandı kim yiyor?”">
+        <button id="ask-btn" class="primary">Sor</button>
+      </div>
+      <div id="ask-answer"></div>
+    </div>
+
+    <div class="card">
+      <header><h2>Optimizasyon politikaları</h2><span class="sub" id="pol-sub"></span></header>
+      <div class="feed" id="policies"></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <header><h2>Simülasyon senaryoları</h2>
+      <span class="sub">demo için trafik olayı tetikle</span></header>
+    <div class="btnrow" id="scenarios"></div>
+    <div class="pill-row" id="active-scenarios"></div>
+  </section>
+
+</main>
+
+<script>
+"use strict";
+
+/* ============================================================== yardımcılar */
+const $ = (sel) => document.querySelector(sel);
+const fmt = (n, d = 1) => Number(n ?? 0).toFixed(d);
+const pct = (n) => `%${Math.round((n ?? 0) * 100)}`;
+const clock = (ts) => new Date((ts ?? 0) * 1000).toLocaleTimeString("tr-TR");
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+const CLASS_ORDER = ["realtime", "interactive", "streaming", "bulk", "background"];
+const CLASS_LABEL = {
+  realtime: "Gerçek zamanlı", interactive: "Etkileşimli", streaming: "Yayın",
+  bulk: "Toplu", background: "Arka plan",
+};
+/* Renk kimliğe bağlı: sıralama değişse de bir sınıfın rengi değişmez. */
+const CLASS_COLOR = {
+  realtime: "var(--s1)", interactive: "var(--s2)", streaming: "var(--s3)",
+  bulk: "var(--s4)", background: "var(--s5)",
+};
+const SEV = {
+  info:     { color: "var(--muted)",    label: "Bilgi",    icon: "•" },
+  low:      { color: "var(--good)",     label: "Düşük",    icon: "•" },
+  medium:   { color: "var(--warning)",  label: "Orta",     icon: "▲" },
+  high:     { color: "var(--serious)",  label: "Yüksek",   icon: "▲" },
+  critical: { color: "var(--critical)", label: "Kritik",   icon: "■" },
+};
+const KIND_LABEL = {
+  rate_limit: "bant sınırı", prioritize: "öncelik ↑", deprioritize: "öncelik ↓",
+  defer: "ertele", rebalance: "yeniden dağıt", advise: "öneri",
+};
+
+function utilColor(u) {
+  if (u >= 0.94) return "var(--critical)";
+  if (u >= 0.80) return "var(--serious)";
+  if (u >= 0.60) return "var(--warning)";
+  return "var(--good)";
+}
+function utilLabel(u) {
+  if (u >= 0.94) return "kritik";
+  if (u >= 0.80) return "tıkanık";
+  if (u >= 0.60) return "yoğun";
+  return "rahat";
+}
+
+/* ==================================================================== durum */
+const state = {
+  status: null, live: null, devices: [], alerts: [], policies: [],
+  report: null, history: [], scenarios: [], available: [],
+};
+const MAX_POINTS = 180;
+
+/* ============================================================== veri çekme */
+async function api(path, opts) {
+  const res = await fetch(path, opts);
+  if (res.status === 204) return null;
+  if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+  return res.json();
+}
+const postJSON = (path, body) => api(path, {
+  method: "POST", headers: { "Content-Type": "application/json" },
+  body: JSON.stringify(body ?? {}),
+});
+
+async function refreshSlow() {
+  try {
+    const [status, devices, actions, scenarios] = await Promise.all([
+      api("/api/status"), api("/api/devices"),
+      api("/api/actions"), api("/api/sim/scenarios"),
+    ]);
+    state.status = status;
+    state.devices = devices;
+    state.policies = actions.active;
+    state.scenarios = scenarios.active;
+    state.available = scenarios.available;
+    renderHeader(); renderTiles(); renderDevices();
+    renderPolicies(); renderScenarios();
+  } catch (err) { console.warn("durum alınamadı", err); }
+}
+
+async function refreshFast() {
+  try {
+    state.live = await api("/api/metrics/live");
+    renderMeters(); renderClassBars(); renderTiles();
+  } catch (err) { console.warn("metrik alınamadı", err); }
+}
+
+async function seed() {
+  try {
+    const [samples, alerts, report] = await Promise.all([
+      api("/api/metrics/history?seconds=900"),
+      api("/api/alerts?limit=40"),
+      api("/api/ai/report").catch(() => null),
+    ]);
+    state.history = samples.slice(-MAX_POINTS).map((s) => ({
+      ts: s.ts, down: s.down_bps / 1e6, up: s.up_bps / 1e6,
+    }));
+    state.alerts = alerts;
+    if (report) state.report = report;
+    renderChart(); renderAlerts(); renderAI();
+  } catch (err) { console.warn("ilk yükleme", err); }
+}
+
+/* ================================================================ websocket */
+function connect() {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  const ws = new WebSocket(`${proto}://${location.host}/ws`);
+  const badge = $("#conn-badge");
+
+  ws.onopen = () => { badge.textContent = "canlı"; badge.classList.add("on"); };
+  ws.onclose = () => {
+    badge.textContent = "bağlantı koptu"; badge.classList.remove("on");
+    setTimeout(connect, 3000);
+  };
+  ws.onmessage = (evt) => {
+    const { kind, payload } = JSON.parse(evt.data);
+    if (kind === "metrics") {
+      state.history.push({
+        ts: Date.now() / 1000,
+        down: payload.down_bps / 1e6, up: payload.up_bps / 1e6,
+      });
+      if (state.history.length > MAX_POINTS) state.history.shift();
+      renderChart();
+    } else if (kind === "alert") {
+      state.alerts.unshift(payload);
+      state.alerts = state.alerts.slice(0, 60);
+      renderAlerts();
+    } else if (kind === "action") {
+      refreshSlow();
+    } else if (kind === "ai_report") {
+      state.report = payload; renderAI();
+    }
+  };
+  // Sunucu tarafı receive_text bekliyor; bağlantıyı canlı tut.
+  setInterval(() => { if (ws.readyState === 1) ws.send("ping"); }, 20000);
+}
+
+/* ================================================================== çizimler */
+function renderHeader() {
+  const s = state.status; if (!s) return;
+  $("#mode-badge").textContent = s.mode === "simulation" ? "simülasyon" : s.mode;
+  const ai = s.ai || {};
+  const badge = $("#ai-badge");
+  badge.textContent = `${ai.provider ?? "—"} · ${ai.model ?? "—"}`;
+  badge.classList.toggle("on", ai.provider === "ollama");
+  badge.title = ai.provider === "mock"
+    ? "Yerel model bulunamadı; kural tabanlı yedek çalışıyor."
+    : "Yerel model bağlı.";
+}
+
+function renderTiles() {
+  const s = state.status; if (!s) return;
+  const link = s.link;
+  const health = s.ai?.health_score;
+  const tiles = [
+    { label: "İndirme", value: fmt(link.down_mbps), unit: "Mbps",
+      note: `kapasite ${link.down_capacity_mbps} Mbps · ${utilLabel(link.down_utilization)}` },
+    { label: "Yükleme", value: fmt(link.up_mbps), unit: "Mbps",
+      note: `kapasite ${link.up_capacity_mbps} Mbps · ${utilLabel(link.up_utilization)}` },
+    { label: "Gecikme", value: fmt(link.avg_rtt_ms, 0), unit: "ms",
+      note: `yeniden gönderim ${pct(link.retransmit_rate)}` },
+    { label: "LAN içi", value: fmt(link.lan_mbps), unit: "Mbps",
+      note: "WAN kapasitesini tüketmez" },
+    { label: "Aktif akış", value: link.active_flows, unit: "",
+      note: `${link.active_devices} cihaz` },
+    { label: "Aktif politika", value: s.active_policies, unit: "",
+      note: `${s.counts.alerts} uyarı` },
+    { label: "Sağlık skoru", value: health ?? "—", unit: health != null ? "/100" : "",
+      note: s.ai?.last_analysis_ts ? `analiz ${clock(s.ai.last_analysis_ts)}` : "analiz bekleniyor" },
+  ];
+  $("#tiles").innerHTML = tiles.map((t) => `
+    <div class="tile">
+      <div class="label">${esc(t.label)}</div>
+      <div class="value">${esc(t.value)}${t.unit ? `<small>${esc(t.unit)}</small>` : ""}</div>
+      <div class="note">${esc(t.note)}</div>
+    </div>`).join("");
+}
+
+function renderMeters() {
+  const s = state.status; if (!s) return;
+  const rows = [
+    { name: "İndirme", u: s.link.down_utilization,
+      now: s.link.down_mbps, cap: s.link.down_capacity_mbps },
+    { name: "Yükleme", u: s.link.up_utilization,
+      now: s.link.up_mbps, cap: s.link.up_capacity_mbps },
+  ];
+  $("#meters").innerHTML = rows.map((r) => `
+    <div class="meter">
+      <div class="meter-head">
+        <span>${esc(r.name)} — <span class="muted">${utilLabel(r.u)}</span></span>
+        <span><b>${pct(r.u)}</b> · ${fmt(r.now)} / ${r.cap} Mbps</span>
+      </div>
+      <div class="meter-track">
+        <div class="meter-fill" style="width:${Math.min(r.u, 1) * 100}%;
+             background:${utilColor(r.u)}"></div>
+        <div class="meter-mark" style="left:80%"></div>
+        <div class="meter-mark" style="left:94%"></div>
+      </div>
+    </div>`).join("");
+}
+
+function renderClassBars() {
+  const live = state.live;
+  const box = $("#classbars");
+  if (!live) { box.innerHTML = '<p class="empty">veri bekleniyor…</p>'; return; }
+  const perClass = live.link.per_class_bps || {};
+  const max = Math.max(...Object.values(perClass), 1);
+  box.innerHTML = CLASS_ORDER.map((cls) => {
+    const bps = perClass[cls] || 0;
+    return `
+      <div class="classrow">
+        <span class="name">${esc(CLASS_LABEL[cls])}</span>
+        <span class="track">
+          <span class="bar" style="width:${(bps / max) * 100}%;
+                background:${CLASS_COLOR[cls]}"></span>
+        </span>
+        <span class="val">${fmt(bps / 1e6)} Mbps</span>
+      </div>`;
+  }).join("");
+}
+
+/* ------------------------------------------------------------- zaman serisi */
+const SVG_NS = "http://www.w3.org/2000/svg";
+function el(name, attrs, text) {
+  const node = document.createElementNS(SVG_NS, name);
+  for (const [k, v] of Object.entries(attrs || {})) node.setAttribute(k, v);
+  if (text != null) node.textContent = text;
+  return node;
+}
+
+function renderChart() {
+  const svg = $("#chart");
+  const wrap = $("#chart-wrap");
+  const data = state.history;
+  const W = wrap.clientWidth || 640, H = 220;
+  const M = { top: 12, right: 52, bottom: 24, left: 44 };
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.innerHTML = "";
+
+  $("#chart-sub").textContent = data.length
+    ? `son ${data.length} örnek` : "";
+
+  if (data.length < 2) {
+    svg.appendChild(el("text", { x: W / 2, y: H / 2, "text-anchor": "middle" },
+      "veri toplanıyor…"));
+    return;
+  }
+
+  const cap = state.status?.link?.down_capacity_mbps ?? 100;
+  const peak = Math.max(cap, ...data.map((d) => Math.max(d.down, d.up)));
+  const yMax = peak * 1.08;
+  const plotW = W - M.left - M.right, plotH = H - M.top - M.bottom;
+  const X = (i) => M.left + (i / (data.length - 1)) * plotW;
+  const Y = (v) => M.top + plotH - (v / yMax) * plotH;
+
+  // Izgara + y ekseni (düz saç teli çizgiler)
+  const ticks = 4;
+  for (let i = 0; i <= ticks; i++) {
+    const v = (yMax / ticks) * i, y = Y(v);
+    svg.appendChild(el("line", {
+      x1: M.left, x2: W - M.right, y1: y, y2: y,
+      stroke: "var(--grid)", "stroke-width": 1,
+    }));
+    svg.appendChild(el("text", {
+      x: M.left - 8, y: y + 3, "text-anchor": "end",
+      style: "font-variant-numeric:tabular-nums",
+    }, Math.round(v)));
+  }
+  svg.appendChild(el("text", {
+    x: M.left - 8, y: M.top - 2, "text-anchor": "end",
+  }, "Mbps"));
+
+  // Kapasite referans çizgisi
+  const capY = Y(cap);
+  svg.appendChild(el("line", {
+    x1: M.left, x2: W - M.right, y1: capY, y2: capY,
+    stroke: "var(--axis)", "stroke-width": 1,
+  }));
+  svg.appendChild(el("text", {
+    x: W - M.right + 6, y: capY + 3,
+  }, `${cap} kap.`));
+
+  // x ekseni etiketleri
+  [0, Math.floor((data.length - 1) / 2), data.length - 1].forEach((i, idx) => {
+    svg.appendChild(el("text", {
+      x: X(i), y: H - 6,
+      "text-anchor": idx === 0 ? "start" : idx === 2 ? "end" : "middle",
+      style: "font-variant-numeric:tabular-nums",
+    }, clock(data[i].ts)));
+  });
+
+  // Seriler — 2px, ince, yumuşatma yok
+  const series = [
+    { key: "down", color: "var(--s1)", label: "İndirme" },
+    { key: "up", color: "var(--s2)", label: "Yükleme" },
+  ];
+  for (const s of series) {
+    const d = data.map((p, i) => `${i ? "L" : "M"}${X(i).toFixed(1)},${Y(p[s.key]).toFixed(1)}`).join("");
+    svg.appendChild(el("path", {
+      d, fill: "none", stroke: s.color, "stroke-width": 2,
+      "stroke-linejoin": "round", "stroke-linecap": "round",
+    }));
+    // Uç noktaya doğrudan etiket (yalnızca son nokta)
+    const last = data[data.length - 1];
+    svg.appendChild(el("circle", {
+      cx: X(data.length - 1), cy: Y(last[s.key]), r: 3.5,
+      fill: s.color, stroke: "var(--surface)", "stroke-width": 2,
+    }));
+    svg.appendChild(el("text", {
+      x: W - M.right + 6, y: Y(last[s.key]) + 3, fill: s.color,
+      style: "font-variant-numeric:tabular-nums;font-weight:600",
+    }, fmt(last[s.key])));
+  }
+
+  // Hover katmanı: crosshair + tooltip
+  const cross = el("line", {
+    y1: M.top, y2: M.top + plotH, stroke: "var(--axis)",
+    "stroke-width": 1, opacity: 0,
+  });
+  svg.appendChild(cross);
+  const overlay = el("rect", {
+    x: M.left, y: M.top, width: plotW, height: plotH,
+    fill: "transparent", style: "cursor:crosshair",
+  });
+  svg.appendChild(overlay);
+
+  const tip = $("#chart-tip");
+  overlay.addEventListener("mousemove", (evt) => {
+    const rect = svg.getBoundingClientRect();
+    const px = (evt.clientX - rect.left) * (W / rect.width);
+    const i = Math.max(0, Math.min(data.length - 1,
+      Math.round(((px - M.left) / plotW) * (data.length - 1))));
+    const p = data[i];
+    cross.setAttribute("x1", X(i)); cross.setAttribute("x2", X(i));
+    cross.setAttribute("opacity", 1);
+    tip.innerHTML = `<div class="muted">${clock(p.ts)}</div>` + series.map((s) =>
+      `<div class="tt-row"><i class="swatch" style="background:${s.color}"></i>
+       ${s.label} <b>${fmt(p[s.key])}</b> Mbps</div>`).join("");
+    tip.style.opacity = 1;
+    const left = (X(i) / W) * rect.width;
+    tip.style.left = `${Math.min(Math.max(left + 12, 0), rect.width - 170)}px`;
+    tip.style.top = `${M.top}px`;
+  });
+  overlay.addEventListener("mouseleave", () => {
+    cross.setAttribute("opacity", 0); tip.style.opacity = 0;
+  });
+}
+
+/* ------------------------------------------------------------------ tablolar */
+function renderDevices() {
+  const body = $("#devices tbody");
+  $("#dev-sub").textContent = `${state.devices.length} kayıtlı`;
+  if (!state.devices.length) {
+    body.innerHTML = '<tr><td colspan="9" class="empty">veri yok</td></tr>';
+    return;
+  }
+  body.innerHTML = state.devices.map((d) => {
+    const sig = d.signals;
+    const policies = (d.policies || []).map((p) =>
+      `<span class="badge on">${esc(KIND_LABEL[p.kind] ?? p.kind)}</span>`).join(" ");
+    return `<tr>
+      <td class="name">${esc(d.hostname)}<br><span class="muted" style="font-size:11px">${esc(d.ip)}</span></td>
+      <td class="name">${esc(d.kind)}</td>
+      <td>${fmt(d.down_mbps)}</td>
+      <td>${fmt(d.up_mbps)}</td>
+      <td>${fmt(d.lan_mbps)}</td>
+      <td>${sig ? sig.flow_count : 0}</td>
+      <td>${sig ? fmt(sig.avg_rtt_ms, 0) : "—"}</td>
+      <td class="name">${esc(sig?.top_app || "—")}</td>
+      <td class="name">${policies || '<span class="muted">—</span>'}</td>
+    </tr>`;
+  }).join("");
+}
+
+function renderAlerts() {
+  const box = $("#alerts");
+  $("#alert-sub").textContent = `${state.alerts.length} kayıt`;
+  if (!state.alerts.length) {
+    box.innerHTML = '<p class="empty">Şu an uyarı yok — ağ sakin.</p>'; return;
+  }
+  box.innerHTML = state.alerts.map((a) => {
+    const sev = SEV[a.severity] || SEV.info;
+    return `<div class="item">
+      <span class="dot" style="background:${sev.color}"></span>
+      <div class="body">
+        <div class="title">${esc(a.title)}
+          <span class="badge">${sev.icon} ${sev.label}</span></div>
+        <div class="detail">${esc(a.detail)}</div>
+        <div class="when">${clock(a.ts)} · ${esc(a.source)}</div>
+      </div>
+    </div>`;
+  }).join("");
+}
+
+function renderPolicies() {
+  const box = $("#policies");
+  $("#pol-sub").textContent = `${state.policies.length} aktif`;
+  if (!state.policies.length) {
+    box.innerHTML = '<p class="empty">Aktif politika yok. Hat rahat.</p>'; return;
+  }
+  box.innerHTML = state.policies.map((p) => {
+    const host = p.params?.hostname || p.target;
+    return `<div class="item">
+      <span class="dot" style="background:${p.applied ? "var(--good)" : "var(--warning)"}"></span>
+      <div class="body">
+        <div class="title">${esc(KIND_LABEL[p.kind] ?? p.kind)} → ${esc(host)}
+          <span class="badge">${p.source === "ai" ? "AI önerisi" : "kural"}</span>
+          <span class="conf">güven ${pct(p.confidence)}</span></div>
+        <div class="detail">${esc(p.reason)}</div>
+        <div class="when">${clock(p.ts)} · ${p.applied ? "uygulandı" : "onay bekliyor"}</div>
+        <div class="btnrow" style="margin-top:6px">
+          <button data-apply="${esc(p.id)}" ${p.applied ? "disabled" : ""}>Uygula</button>
+          <button data-revert="${esc(p.id)}">Kaldır</button>
+        </div>
+      </div>
+    </div>`;
+  }).join("");
+}
+
+function renderAI() {
+  const r = state.report;
+  const box = $("#ai-panel");
+  if (!r) { box.innerHTML = '<p class="empty">İlk analiz bekleniyor…</p>'; return; }
+  $("#ai-sub").textContent = `${r.model} · ${fmt(r.latency_ms, 0)} ms · ${clock(r.ts)}`;
+
+  const findings = (r.findings || []).map((f) => {
+    const sev = SEV[f.severity] || SEV.info;
+    return `<div class="item">
+      <span class="dot" style="background:${sev.color}"></span>
+      <div class="body">
+        <div class="title">${esc(f.title)} <span class="badge">${sev.icon} ${sev.label}</span></div>
+        <div class="detail">${esc(f.evidence)}</div>
+      </div></div>`;
+  }).join("");
+
+  const recs = (r.recommendations || []).map((c) => `
+    <div class="item">
+      <span class="dot" style="background:var(--s1)"></span>
+      <div class="body">
+        <div class="title">${esc(KIND_LABEL[c.action] ?? c.action)} → ${esc(c.target)}
+          <span class="conf">güven ${pct(c.confidence)}</span></div>
+        <div class="detail">${esc(c.reason)}</div>
+      </div></div>`).join("");
+
+  box.innerHTML = `
+    <p class="ai-summary">${esc(r.summary || "—")}</p>
+    ${r.error ? `<p class="empty">model hatası: ${esc(r.error)}</p>` : ""}
+    ${findings ? `<h3 style="font-size:12px;margin:14px 0 8px;color:var(--muted)">BULGULAR</h3>
+                  <div class="feed">${findings}</div>` : ""}
+    ${recs ? `<h3 style="font-size:12px;margin:14px 0 8px;color:var(--muted)">ÖNERİLER</h3>
+              <div class="feed">${recs}</div>` : ""}`;
+}
+
+function renderScenarios() {
+  const labels = {
+    congestion: "Tıkanma", bandwidth_hog: "Bant canavarı", port_scan: "Port taraması",
+    exfil: "Veri sızdırma", beacon: "C2 beacon", quiet: "Sessiz saat",
+  };
+  $("#scenarios").innerHTML = state.available.map((n) =>
+    `<button data-scenario="${esc(n)}">${esc(labels[n] ?? n)}</button>`).join("")
+    + '<button data-clear="1">Hepsini temizle</button>';
+  $("#active-scenarios").innerHTML = state.scenarios.map((s) =>
+    `<span class="badge on">${esc(labels[s.name] ?? s.name)} · ${fmt(s.remaining, 0)} sn</span>`
+  ).join("");
+}
+
+/* ================================================================ etkileşim */
+document.addEventListener("click", async (evt) => {
+  const target = evt.target.closest("button");
+  if (!target) return;
+
+  if (target.dataset.scenario) {
+    target.disabled = true;
+    try {
+      await postJSON("/api/sim/scenario", { name: target.dataset.scenario, duration: 90 });
+      await refreshSlow();
+    } finally { target.disabled = false; }
+  } else if (target.dataset.clear) {
+    await api("/api/sim/scenarios", { method: "DELETE" });
+    await refreshSlow();
+  } else if (target.dataset.apply) {
+    await postJSON(`/api/actions/${target.dataset.apply}/apply`);
+    await refreshSlow();
+  } else if (target.dataset.revert) {
+    await postJSON(`/api/actions/${target.dataset.revert}/revert`);
+    await refreshSlow();
+  }
+});
+
+$("#analyze-btn").addEventListener("click", async (evt) => {
+  const btn = evt.currentTarget;
+  btn.disabled = true; btn.textContent = "analiz ediliyor…";
+  try {
+    state.report = await postJSON("/api/ai/analyze");
+    renderAI();
+  } catch (err) {
+    $("#ai-panel").innerHTML = `<p class="empty">analiz başarısız: ${esc(err.message)}</p>`;
+  } finally { btn.disabled = false; btn.textContent = "Şimdi analiz et"; }
+});
+
+async function ask() {
+  const input = $("#ask-input");
+  const question = input.value.trim();
+  if (!question) return;
+  const out = $("#ask-answer");
+  out.innerHTML = '<p class="empty">düşünüyor…</p>';
+  try {
+    const res = await postJSON("/api/ai/ask", { question });
+    out.innerHTML = `<div class="item" style="margin-top:12px">
+        <span class="dot" style="background:var(--s1)"></span>
+        <div class="body">
+          <div class="detail" style="white-space:pre-wrap">${esc(res.answer || res.error || "—")}</div>
+          <div class="when">${esc(res.model)} · ${fmt(res.latency_ms, 0)} ms</div>
+        </div></div>`;
+  } catch (err) {
+    out.innerHTML = `<p class="empty">hata: ${esc(err.message)}</p>`;
+  }
+}
+$("#ask-btn").addEventListener("click", ask);
+$("#ask-input").addEventListener("keydown", (e) => { if (e.key === "Enter") ask(); });
+
+$("#theme-toggle").addEventListener("click", () => {
+  const root = document.documentElement;
+  const dark = root.dataset.theme
+    ? root.dataset.theme === "dark"
+    : matchMedia("(prefers-color-scheme: dark)").matches;
+  root.dataset.theme = dark ? "light" : "dark";
+  try { localStorage.setItem("ntc-theme", root.dataset.theme); } catch {}
+  renderChart();
+});
+try {
+  const saved = localStorage.getItem("ntc-theme");
+  if (saved) document.documentElement.dataset.theme = saved;
+} catch {}
+
+new ResizeObserver(() => renderChart()).observe($("#chart-wrap"));
+
+/* ==================================================================== başlat */
+refreshSlow();
+refreshFast();
+seed();
+connect();
+setInterval(refreshSlow, 5000);
+setInterval(refreshFast, 2000);
+</script>
+</body>
+</html>

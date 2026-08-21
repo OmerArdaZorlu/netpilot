@@ -1,0 +1,9 @@
+# --- core runtime ---
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+httpx==0.28.1
+pyyaml==6.0.2
+rich==13.9.4
+
+# --- live capture mode (optional, faz 2) ---
+# scapy==2.6.1
