@@ -177,27 +177,67 @@ Server 2025 Evaluation (ücretsiz, 180 gün) / Azure VM / Win11 Pro yükseltme.
    yazmak, mevcut izleme araçlarının bizi görmesini sağlar.
    PowerShell modülü: `Get-NtcStatus`, `Get-NtcDevice`, `Invoke-NtcAnalysis`.
 
-### Tasarımı konuşuldu, kodu yazılmadı
+### Yazıldı ve doğrulandı
 
-4. **Çoklu kenar yönlendirme motoru**
-   Kullanıcının asıl "optimizasyon"dan kastı buydu: hat yoğunken trafiği
-   diğer kenarlardan akıtmak. Mevcut optimizer sadece *şekillendirme* yapıyor.
+4. **✅ Akış optimizasyonu — çok mallı akış çözücüsü** *(2026-08-24)*
 
-   Gerekenler: topoloji modeli (kenar başına kapasite/gecikme/maliyet/sağlık),
-   `Flow`'a yol alanı, kenar başına metrik, yeni aksiyonlar
-   (`reroute`/`failover`/`split`/`pin`), aktif prob katmanı.
+   *Kullanıcının "optimizasyon"dan kastı buydu ve uzun süre yanlış anlaşıldı:
+   Faz 1'deki `optimizer.py` bir **eşik denetçisi** (doluluk %80'i geçti → not
+   yaz), optimizasyon değil. Asıl istenen, ölçülen taleplerin ağ üzerinde en
+   iyi nasıl dağıtılacağını **hesaplamak**.*
 
-   Zor kısımlar: oturum sürekliliği (kurulu TCP akışı taşınamaz — sadece yeni
-   akışlar yönlendirilir), yalpalama önleme (histerezis şart), maliyet
-   farkındalığı (sayaçlı LTE'ye Netflix dökülmemeli), sınıf uygunluğu
-   (VoIP görüşme ortasında taşınmaz, toplu indirme taşınır).
+   | Dosya | Ne yapıyor |
+   |---|---|
+   | `ntc/traffic/topology.py` | Yönlü kapasiteli grafik. Kenar başına kapasite / gecikme / maliyet / sağlık. İndirme ve yükleme ayrı kenar (asimetri gerçek) |
+   | `ntc/traffic/flowopt.py` | Çok mallı akış problemini doğrusal program olarak kurup `scipy` HiGHS ile çözer |
 
-   **⚠️ Windows kısıtı:** RRAS gerçek anlamda politika tabanlı yönlendirme
-   yapamıyor (Linux'taki `ip rule` karşılığı yok). OSPF Server 2003'ten sonra
-   kaldırıldı, BGP sadece çok kiracılı senaryo için. Yapılabilecekler:
-   (a) hedefe göre statik rota + arayüz metriği — kaba ama gerçekçi,
+   **Politika: önce öncelik, sonra adalet.** Sınıflar sırayla çözülüyor
+   (realtime → … → background), yüksek öncelikli çözüm sonrakiler için kısıt
+   olarak sabitleniyor. Her sınıf içinde iki aşama: (1) en kötü durumdaki
+   akışın karşılanma oranını maksimize et — tek akışın aç kalmasını engeller,
+   (2) o oran taban iken toplamı maksimize et.
+
+   **Çıktı:** akış başına verilen hız + kenar kullanımı, cihaz başına
+   "şu kadarını geri çek" listesi, doymuş kenarlar (darboğaz).
+
+   **Doğrulama:** 7 senaryo, cevapları elle hesaplanabilir —
+   `scratchpad/t_flowopt.py`. Darboğaz paylaşımı, sınıf önceliği, çok kenara
+   bölme, sayaçlı hattan kaçınma, LAN/WAN ayrımı, bozuk hattan kaçınma,
+   ulaşılamaz hedef. Gerçek simüle trafikte de koşturuldu: 425 Mbps talep /
+   350 Mbps kapasite → üç WAN çıkışı da doldu, realtime-interactive-streaming
+   %100, bulk %47, background %0.
+
+   **⚠️ Katı öncelik en alt sınıfı tamamen aç bırakıyor.** Ölçümde
+   `background` %0 aldı. DNS ve keepalive o sınıfta ve küçük olsalar da
+   kesilmeleri kabul edilemez. **Sınıf başına asgari garanti eklenmeli** —
+   şu an yok, bilinçli bir eksik.
+
+   **⚠️ Tam sözlüksel max-min adalet değil.** Sınıf içinde tek turlu
+   yaklaşım; ikinci aşama birinci aşamada eşitlenmiş akışlardan bazılarını
+   daha fazla besleyebilir. Gerçek adalet turlu darboğaz sabitlemesi ister.
+
+   **Henüz bağlanmadı:** çözücü `controller.py` döngülerine takılmadı,
+   panelde görünmüyor, `Flow`'a yol alanı eklenmedi. Şu an kütüphane olarak
+   duruyor ve tek başına çalışıyor.
+
+   **⚠️ Windows kısıtı yerinde duruyor:** RRAS politika tabanlı yönlendirme
+   yapamıyor. Çözücünün ürettiği yol kararı saf Windows'ta doğrudan
+   uygulanamaz — (a) hedefe göre statik rota + arayüz metriği, ya da
    (b) DSCP ile işaretleyip yol seçimini gerçek router/SD-WAN'a bırakmak.
    **Uygulama-farkında yönlendirmeyi saf Windows'ta vaat etme.**
+
+### Tasarımı konuşuldu, kodu yazılmadı
+
+4b. **İnfaz katmanı — çözücünün kararını uygulayan taraf**
+
+   Optimize edici bir *hedef durum* üretiyor; onu uygulayan hiçbir şey yok.
+   `applied` alanı yalnızca bir boolean, tüketen kod yok. Kilitli karar QoS
+   için `Set-NetQosPolicy`.
+
+   **⚠️ Kayıt boşluğu:** kullanıcı "ağın girişinde ortak bir cache, AI ona
+   göre önceliklendirir" diye bir tasarım hatırlıyor; bunun kaydı hiçbir
+   yerde yok (kod, bu dosya, README, git geçmişi arandı). Kuyruk mu içerik
+   önbelleği mi olduğu netleşmedi. **Netleşince buraya yaz.**
 
 ### Lab gerektiriyor
 

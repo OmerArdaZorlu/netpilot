@@ -5,5 +5,11 @@ httpx==0.28.1
 pyyaml==6.0.2
 rich==13.9.4
 
+# --- akış optimizasyonu (flowopt.py) ---
+# Çok mallı akış problemi doğrusal program olarak kuruluyor; HiGHS çözücüsü
+# scipy içinde geliyor. numpy scipy'nin zaten bağımlılığı, açıkça yazıldı.
+numpy>=1.26
+scipy>=1.11
+
 # --- live capture mode (optional, faz 2) ---
 # scapy==2.6.1
