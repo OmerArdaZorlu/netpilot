@@ -12,14 +12,21 @@ tespit eder, gerekçeli QoS politikaları üretir; AI analisti bu tabloyu okuyup
 - Eşik tabanlı kural motoru — tıkanma tespiti, QoS politika taslakları
 - **Akış optimize edici** — çok mallı akış problemini doğrusal programla
   çözer: hangi trafik hangi çıkıştan, kimden ne kadar geri çekilmeli
+- **Topoloji üreteci** — tohumlu, rastgele ama gerçekçi ağlar; sistem elle
+  yazılmış tek bir topolojiye bağlı değil
+- **İnfaz katmanı** — planı cihazdan bağımsız politikalara, onları `tc` /
+  `New-NetQosPolicy` komutlarına çevirir; farkı uzlaştırır
 - Yerel LLM analisti (Foundry Local / Ollama / kural tabanlı yedek)
 - Canlı panel, simülasyon ortamı, 6 tetiklenebilir senaryo
 
-**Sonraki:** infaz katmanı (üretilen planı gerçekten uygulamak) → akıllı
-firewall → honeypot/deception → endpoint agent'ları.
+**Sonraki:** canlı yakalama (scapy) → akıllı firewall → honeypot/deception →
+endpoint agent'ları.
 
-> ⚠️ Üretilen politikalar şu an **uygulanmıyor**. Sistem ölçüyor, hesaplıyor ve
-> öneriyor; ağa dokunan bir modül henüz yok.
+> ⚠️ İnfaz **gölge modda**. Komutlar üretilir ve panelde gösterilir, hiçbiri
+> çalıştırılmaz. Canlı mod bilerek bağlanmadı: üzerinde doğrulama
+> yapabileceğimiz gerçek bir cihaz yok ve sınanmamış çalıştırma kodu "hazır"
+> görünür. Komut *metni* teste karşı doğrulandı, komutun cihazdaki *davranışı*
+> doğrulanmadı.
 
 ---
 
@@ -95,6 +102,11 @@ python -m ntc ask "en çok bandı kim yiyor?"
 │Optimizer │  │  FlowOpt   │  │AI Analyst │  yerel LLM
 │(eşikler) │  │ (LP çözücü)│  │ (bağlam)  │  Foundry Local
 └────┬─────┘  └─────┬──────┘  └────┬──────┘
+     │              │              │
+     │        ┌─────▼──────┐       │  politika -> sürücü -> uzlaştırma
+     │        │  Enforce   │       │  (gölge modda: komut üretir,
+     │        │ (politika) │       │   çalıştırmaz)
+     │        └─────┬──────┘       │
      └──────────────┼──────────────┘
               ┌──────▼───────┐
               │  Controller  │  olay yolu + kalıcılık
@@ -111,6 +123,33 @@ politika `traffic/optimizer.py` içindeki ölçülebilir eşiklerden çıkar. Mo
 çökse, yavaşlasa veya saçmalasa da sistem doğru çalışmaya devam eder. AI katmanı
 üstüne özet, bulgu ve öneri ekler.
 
+**Optimizasyonun değeri çıkış sayısından geliyor.** Tek çıkışlı bir ağda
+çözücünün yapabileceği tek şey paylaştırmak: birinden alıp ötekine vermek,
+toplam sabit kalır. Birden çok çıkış olunca boşta duran bacak kullanılıyor ve
+kazanç gerçek oluyor. Ölçüldü (220 Mbps talep, 100 Mbps'lik bacaklar):
+
+```
+tek hat  ->  100 Mbps geçiyor  (%45)   srv-yedek 4 Mbps'e düşüyor ki ws'ler geçsin
+iki hat  ->  200 Mbps geçiyor  (%91)   = x2.00, kimse kısılmadan
+```
+
+12 rastgele mimaride (9–17 düğüm, 1–5 site, 1–4 çıkış) ortalama **x1.34**
+kazanç ölçüldü; en yükseği x1.63. Tek çıkışlı olanlar dürüstçe x1.00 —
+orada kazanılacak bir şey yok.
+
+**Topoloji elle yazılmak zorunda değil.** `Topology.generate(seed, sites,
+egresses)` tohumlu, gerçekçi bir ağ üretiyor: uçlarda LAN'lar, aralarında
+dağıtım router'ları, çekirdekte kesişim, birden çok WAN çıkışı. Elle yazılmış
+tek bir topolojide çalışmak hiçbir şey kanıtlamıyor — sistemin işi *ne bulursa
+onda* çalışmak. Çözücü, çevirici ve infaz katmanlarının hiçbiri düğüm adı
+varsaymıyor.
+
+**Hat kapasitesinin tek kaynağı topolojidir.** Panel doluluğu `link:`
+ayarından, çözücünün darboğazı topolojiden hesaplanıyordu; ikisi elle
+tutulduğu için bir kez ayrıştılar ve panel "%92 dolu" derken çözücü "darboğaz
+yok" dedi. Artık `link:` topolojiden türetiliyor — kuralı yorumla korumak
+yerine yapıyla koruyoruz.
+
 **Eşik denetimi ile optimizasyon ayrı işlerdir.** `optimizer.py` bir
 termostattır: doluluk eşiği aşınca politika taslağı üretir. `flowopt.py` ise
 gerçek bir optimizasyon yapar — talepleri topolojinin kenarlarına dağıtan çok
@@ -118,6 +157,33 @@ mallı akış problemini doğrusal programla çözer ve "hangi trafik hangi çı
 kimden ne kadar geri çekilmeli" sorusunu cevaplar. Sınıf öncelikleri katı
 uygulanır, ama her sınıfın kapasiteden bir asgari garantisi vardır — yoksa en
 düşük öncelikli sınıf (DNS, keepalive) tamamen aç kalıyordu.
+
+**Kapsam başına ayrı sürücü.** Kısıt ağın iki farklı yerinde uygulanıyor ve
+oralar aynı dili konuşmuyor: çekirdekteki router `tc` + `ip rule`, uçtaki
+Windows domain `New-NetQosPolicy`. Her kural `scope` alanını taşıyor ve
+uzlaştırıcı onu doğru sürücüye yolluyor (`enforce.core_driver` /
+`enforce.edge_driver`). Tek sürücü seçseydik ya uçtaki damgalar ya
+çekirdekteki indirme kısıtları sessizce düşerdi.
+
+**Kısan her kural operatör onayı bekler, damgalar beklemez.** Hız tavanı ve
+yol ataması birinin bandını daraltır; yanlışsa zararı vardır, o yüzden
+`applied` bayrağı olmadan cihaza inmez. DSCP damgası kimseyi kısmaz, yalnız
+trafiği tanıtır — en kötü ihtimalle yol üstündeki cihaz onu yok sayar. Aynı
+kapıdan geçirmek, zararsız olanı da gereksiz yere bekletirdi.
+
+**İnfaz sil-kur değil, fark uygular.** Çözücü 15 saniyede bir yeni plan
+üretiyor; her turda tüm kuralları silip yeniden kursaydık (a) sil ile kur
+arasındaki boşlukta tıkanma anında vana tamamen açılırdı, (b) değişmeyen
+kural için de cihaza komut giderdi. Her kuralın iki kimliği var: `key`
+(kimlik) ve `fingerprint` (kimlik + değer). Fark ikisinin karşılaştırmasından
+çıkıyor ve tavan 0.1 Mbps'e yuvarlanıyor, yoksa ölçüm gürültüsü her turda
+"değişti" derdi.
+
+**Yapılamayan sessizce atlanmaz.** Windows QoS indirmeyi kısamaz (veri sana
+ulaştıysa dar boğazı çoktan geçmiştir) ve yol seçemez (Windows yalnız hedefe
+göre yönlendirir). Sürücü bunlara yaklaşık bir komut üretmek yerine gerekçesi
+yazılı bir "atlandı" kaydı bırakıyor; kural aktif sayılmıyor ve bir sonraki
+turda yeniden deneniyor.
 
 **AI önerileri otomatik uygulanmaz.** LLM'den gelen aksiyonlar `source="ai"`,
 `applied=False` olarak üretilir ve operatörün onayını bekler. Halüsinasyon ağa
@@ -177,6 +243,9 @@ curl -X POST http://127.0.0.1:8080/api/sim/scenario \
 | `GET /api/flow/plan` | Son akış çözümü: tahsisler, geri çekmeler, darboğazlar |
 | `POST /api/flow/solve` | Beklemeden yeniden çöz |
 | `GET /api/flow/topology` | Topoloji grafiği (düğümler + kenarlar) |
+| `GET /api/enforce/state` | İnfaz durumu: sürücü, mod, kurulu kurallar, son uzlaştırma |
+| `GET /api/enforce/policies` | Son plandan çıkan **istenen** politika kümesi |
+| `GET /api/enforce/preview` | Kuru çalıştırma: hepsi onaylı olsa hangi komutlar çıkardı |
 | `POST /api/sim/scenario` · `DELETE /api/sim/scenarios` | Senaryo tetikle / temizle |
 | `WS /ws` | Canlı metrik / uyarı / aksiyon / rapor akışı |
 
@@ -197,8 +266,9 @@ NTC_AI__MODEL=llama3.2  NTC_API__PORT=9000  python -m ntc serve
 
 - [x] **Faz 1 — Trafik izleme + kural motoru**
 - [x] **Akış optimizasyonu** — topoloji modeli + çok mallı akış çözücüsü
-- [ ] **İnfaz katmanı** — üretilen planı gerçekten uygulamak
-      (`Set-NetQosPolicy`, önce gölge modda)
+- [x] **İnfaz katmanı** — politika nesneleri + `tc`/`New-NetQosPolicy`
+      sürücüleri + fark uzlaştırıcı. Gölge modda; canlı çalıştırma gerçek
+      cihaz üzerinde doğrulanana kadar bağlanmayacak.
 - [ ] **Faz 2 — Canlı mod:** scapy ile gerçek arayüz yakalama; `LiveSource`
       simülatörün yerine aynı arayüzden geçer
 - [ ] **Faz 3 — Akıllı firewall:** kural motoru + LLM'in trafik bağlamına bakıp

@@ -35,6 +35,14 @@ from .traffic.flowopt import (
     actions_from_plan,
     demands_from_signals,
 )
+from .enforce import (
+    Enforcer,
+    PolicySet,
+    Reconciliation,
+    approved_keys,
+    build_driver,
+    policies_from_plan,
+)
 from .traffic.optimizer import TrafficOptimizer
 from .traffic.topology import Topology
 from .traffic.simulator import TrafficSimulator
@@ -47,16 +55,39 @@ class Controller:
         self.cfg = cfg
         self.bus = EventBus()
         self.simulator = TrafficSimulator()
-        self.metrics = MetricsEngine(cfg.link, cfg.collector.window_seconds)
-        self.optimizer = TrafficOptimizer(cfg.optimizer, cfg.link)
         # Akış optimize edici — eşik denetçisinden ayrı bir iş yapıyor:
         # eşik "hat doldu" der, bu "trafiği nasıl dağıtalım" hesaplar.
-        self.topology = Topology.from_config(cfg.topology_raw)             if cfg.topology_raw else Topology.default(
-                cfg.link.downlink_mbps, cfg.link.uplink_mbps)
+        self.topology = (
+            Topology.from_config(cfg.topology_raw) if cfg.topology_raw
+            else Topology.default(cfg.link.downlink_mbps, cfg.link.uplink_mbps))
+
+        # **Hat kapasitesinin tek kaynağı topoloji.** Panel doluluğu `link:`
+        # ayarından, çözücünün darboğazı topolojiden hesaplanıyor. İkisi elle
+        # tutulduğunda bir kez ayrıştılar: panel "%92 dolu" derken çözücü
+        # "darboğaz yok" dedi, çünkü varsayılan topoloji yapılandırmada
+        # olmayan kapasite uyduruyordu. Türetince ayrışması imkânsız hale
+        # geliyor — kuralı yorumla korumaktansa yapıyla korumak daha güvenli.
+        _d, _u = self.topology.wan_capacity()
+        if _d > 0 and _u > 0:
+            if (abs(_d - cfg.link.downlink_mbps) > 0.5
+                    or abs(_u - cfg.link.uplink_mbps) > 0.5):
+                log.info("Hat kapasitesi topolojiden alındı: %.0f/%.0f Mbps "
+                         "(yapılandırmada %.0f/%.0f yazıyordu)",
+                         _d, _u, cfg.link.downlink_mbps, cfg.link.uplink_mbps)
+            cfg.link.downlink_mbps = _d
+            cfg.link.uplink_mbps = _u
+
+        # Bunlar `cfg.link` referansını topoloji türetmesinden **sonra** alıyor.
+        self.metrics = MetricsEngine(cfg.link, cfg.collector.window_seconds)
+        self.optimizer = TrafficOptimizer(cfg.optimizer, cfg.link)
         self.flow_optimizer = FlowOptimizer(self.topology)
         self.flow_plan: FlowPlan | None = None
         # Akışları planın oranlarına göre çıkışlara dağıtır.
         self.path_assigner = PathAssigner()
+        # İnfaz katmanı — planı politikaya, politikayı cihaz komutuna çevirir.
+        # Varsayılan gölge modu: komut üretir, çalıştırmaz.
+        self.enforcer = self._build_enforcer()
+        self.policies = PolicySet()
         self.storage = Storage(cfg.storage.resolved_path(), cfg.storage.retain_hours)
 
         self.provider: LLMProvider | None = None
@@ -69,6 +100,47 @@ class Controller:
         self._tasks: list[asyncio.Task] = []
         self._running = False
         self.started_at = 0.0
+
+    def _build_enforcer(self) -> Enforcer | None:
+        """Yapılandırmadaki sürücüyü kurar.
+
+        Sürücü kurulamıyorsa (yanlış ad, eksik parametre) denetleyici
+        **çalışmaya devam ediyor** — infaz olmadan sistem hâlâ ölçüyor,
+        hesaplıyor ve öneriyor. İnfazın açılamaması ölçümü de durdursaydı,
+        elde hiçbir şey kalmazdı.
+        """
+        cfg = self.cfg.enforce
+        if not cfg.enabled:
+            return None
+
+        def kur(ad: str):
+            kwargs: dict = {}
+            if ad == "linux":
+                kwargs = {"wan_if": cfg.wan_if, "lan_if": cfg.lan_if,
+                          "table_by_egress": dict(cfg.tables or {})}
+            return build_driver(ad, **kwargs)
+
+        try:
+            # Kapsam başına sürücü: çekirdek router ile uçtaki Windows
+            # domain aynı anda sürülüyor. İkisi de boşsa tek `driver`
+            # tüm kapsamlara bakıyor (tek cihazlı kurulum, demo).
+            if cfg.core_driver or cfg.edge_driver:
+                surucular = {}
+                if cfg.core_driver:
+                    surucular["core"] = kur(cfg.core_driver)
+                if cfg.edge_driver:
+                    surucular["edge"] = kur(cfg.edge_driver)
+                hedef = surucular
+            else:
+                hedef = kur(cfg.driver)
+            # Canlı mod bilerek desteklenmiyor: çalıştırıcı ancak üzerinde
+            # doğrulama yapılabilecek bir cihaz varken yazılmalı.
+            return Enforcer(hedef, mode="golge")
+        except Exception:
+            log.exception("İnfaz sürücüsü kurulamadı (core=%s edge=%s tek=%s); "
+                          "infaz kapalı",
+                          cfg.core_driver, cfg.edge_driver, cfg.driver)
+            return None
 
     # ------------------------------------------------------------------ yaşam
 
@@ -94,6 +166,14 @@ class Controller:
 
     async def stop(self) -> None:
         self._running = False
+        # Kurduğumuz kısıtları bırakmadan çıkmıyoruz. Sahipsiz kalan bir
+        # hız tavanı en kötü arıza biçimi: sebebi görünmez, kimse kaldırmaz.
+        if self.enforcer is not None and self.enforcer.active:
+            try:
+                geri = self.enforcer.rollback()
+                log.info("İnfaz geri alındı: %s", geri.summary())
+            except Exception:
+                log.exception("İnfaz geri alınamadı")
         for task in self._tasks:
             task.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
@@ -196,6 +276,8 @@ class Controller:
         if recorded:
             await self._emit_actions(recorded)
 
+        await self._enforce(plan)
+
         pulls = plan.pullbacks(self.cfg.flow.min_pullback_mbps)
         if pulls:
             top = pulls[0]
@@ -204,6 +286,29 @@ class Controller:
                      len(pulls), top["device"], top["pullback_mbps"],
                      ", ".join(b["edge"] for b in plan.bottlenecks()) or "yok")
         return plan
+
+    async def _enforce(self, plan: FlowPlan) -> Reconciliation | None:
+        """Planı politikaya çevirip infaz katmanına uzlaştırır.
+
+        **Aksiyon defterinden sonra çağrılıyor, önce değil.** Onay kapısı
+        aksiyonların `applied` bayrağına bakıyor; defter güncellenmeden
+        çağırsaydık operatörün bu turda onayladığı bir aksiyon bir tur
+        gecikmeyle uygulanırdı.
+        """
+        if self.enforcer is None:
+            return None
+        self.policies = policies_from_plan(
+            plan, self.simulator.devices, self.cfg.flow.min_pullback_mbps)
+        onay = None
+        if self.cfg.enforce.require_approval:
+            onay = approved_keys(list(self.optimizer.active.values()),
+                                 self.policies)
+        try:
+            return await asyncio.to_thread(
+                self.enforcer.reconcile, self.policies, onay)
+        except Exception:
+            log.exception("İnfaz uzlaştırması başarısız")
+            return None
 
     def _stamp_paths(self, flows: list) -> None:
         """Yeni akışlara çıkış düğümü damgalar.

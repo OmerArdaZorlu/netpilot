@@ -129,6 +129,42 @@ def create_app(cfg: Config | None = None) -> FastAPI:
     async def flow_topology():
         return controller.topology.to_dict()
 
+    @app.get("/api/enforce/state")
+    async def enforce_state():
+        """İnfaz katmanının durumu: hangi sürücü, hangi mod, hangi kurallar."""
+        if controller.enforcer is None:
+            return {"enabled": False,
+                    "note": "infaz kapalı (config: enforce.enabled)"}
+        return {"enabled": True,
+                "require_approval": controller.cfg.enforce.require_approval,
+                **controller.enforcer.to_dict()}
+
+    @app.get("/api/enforce/policies")
+    async def enforce_policies():
+        """Son plandan çıkan **istenen** politika kümesi.
+
+        Uzlaştırıcının kurduğuyla aynı olmak zorunda değil: onaysız veya
+        sürücünün desteklemediği kurallar burada görünür ama kurulmaz.
+        `/api/enforce/state` içindeki `last.skipped` neden kurulmadığını
+        gerekçesiyle söylüyor.
+        """
+        return controller.policies.to_dict()
+
+    @app.get("/api/enforce/preview")
+    async def enforce_preview():
+        """Kuru çalıştırma: şu an onaylanmış olsa hangi komutlar çıkardı.
+
+        Gerçek uzlaştırıcının durumunu bozmuyor — ayrı bir Enforcer örneği
+        üzerinde hesaplanıyor. Aksi halde "önizleme" tuşuna basmak, kuralları
+        kurulmuş sayıp bir sonraki gerçek turda "değişmedi" dedirtirdi.
+        """
+        if controller.enforcer is None:
+            return {"enabled": False}
+        from ..enforce import Enforcer
+        gecici = Enforcer(dict(controller.enforcer.drivers), mode="golge")
+        sonuc = gecici.reconcile(controller.policies)
+        return sonuc.to_dict()
+
     @app.get("/api/alerts")
     async def alerts(limit: int = Query(50, ge=1, le=500), persisted: bool = False):
         if persisted:

@@ -184,6 +184,18 @@ svg text { fill: var(--muted); font-size: 10px; }
 .ai-summary { font-size: 14px; line-height: 1.6; }
 .pill-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
 .conf { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 11px; }
+
+/* İnfaz komutları: uzun ve kırılmamalı — kendi içinde yatay kaysın,
+   sayfa gövdesi kaymasın. */
+.cmds {
+  margin: 0; padding: 12px; border-radius: 8px;
+  background: var(--bg2, rgba(127,127,127,.08));
+  border: 1px solid var(--line, rgba(127,127,127,.2));
+  font-size: 12px; line-height: 1.6; overflow-x: auto;
+  white-space: pre; min-height: 60px; max-height: 320px; overflow-y: auto;
+}
+.cmds .del { color: var(--s1, #e5484d); }
+.cmds .note { color: var(--muted); }
 </style>
 </head>
 <body>
@@ -296,6 +308,28 @@ svg text { fill: var(--muted); font-size: 10px; }
     </div>
   </section>
 
+  <section class="card" id="enforce-card">
+    <header>
+      <h2>İnfaz</h2>
+      <span class="sub" id="enforce-sub">yükleniyor…</span>
+      <span style="flex:1"></span>
+      <span class="badge" id="enforce-mode">—</span>
+    </header>
+
+    <div class="flow-grid">
+      <div>
+        <h3 class="flow-h">Kurulu kurallar</h3>
+        <div class="feed" id="enforce-active"></div>
+        <h3 class="flow-h" style="margin-top:20px">Uygulanamayanlar</h3>
+        <div class="feed" id="enforce-skipped"></div>
+      </div>
+      <div>
+        <h3 class="flow-h">Son turda üretilen komutlar</h3>
+        <pre class="cmds" id="enforce-cmds"></pre>
+      </div>
+    </div>
+  </section>
+
   <section class="card">
     <header><h2>Simülasyon senaryoları</h2>
       <span class="sub">demo için trafik olayı tetikle</span></header>
@@ -374,11 +408,12 @@ const postJSON = (path, body) => api(path, {
 
 async function refreshSlow() {
   try {
-    const [status, devices, actions, scenarios, flow] = await Promise.all([
+    const [status, devices, actions, scenarios, flow, enforce] = await Promise.all([
       api("/api/status"), api("/api/devices"),
       api("/api/actions"), api("/api/sim/scenarios"),
       // Plan 15 sn'de bir yenileniyor; burada okumak ayrı bir döngüden ucuz.
       api("/api/flow/plan").catch(() => null),
+      api("/api/enforce/state").catch(() => null),
     ]);
     state.status = status;
     state.devices = devices;
@@ -386,8 +421,9 @@ async function refreshSlow() {
     state.scenarios = scenarios.active;
     state.available = scenarios.available;
     if (flow) state.flow = flow;
+    if (enforce) state.enforce = enforce;
     renderHeader(); renderTiles(); renderDevices();
-    renderPolicies(); renderScenarios(); renderFlow();
+    renderPolicies(); renderScenarios(); renderFlow(); renderEnforce();
   } catch (err) { console.warn("durum alınamadı", err); }
 }
 
@@ -1035,6 +1071,57 @@ refreshSlow();
 refreshFast();
 seed();
 connect();
+/* İnfaz kartı — kararın ağa nasıl indiğini gösteren yer.
+
+   Kurulu kural listesi kasten "aktif kural" değil "**kurulu**": gölge modda
+   hiçbir komut çalıştırılmıyor, dolayısıyla ağda gerçekten duran bir şey yok.
+   Alt yazıda mod açıkça yazıyor ki panele bakan biri gölgeyi canlı sanmasın. */
+function renderEnforce() {
+  const e = state.enforce;
+  const sub = $("#enforce-sub"), mode = $("#enforce-mode");
+  if (!e || e.enabled === false) {
+    sub.textContent = e?.note || "infaz kapalı";
+    mode.textContent = "kapalı";
+    $("#enforce-active").innerHTML = "";
+    $("#enforce-skipped").innerHTML = "";
+    $("#enforce-cmds").textContent = "";
+    return;
+  }
+
+  const last = e.last;
+  mode.textContent = e.mode === "golge"
+    ? `gölge · ${e.driver}` : `CANLI · ${e.driver}`;
+  sub.textContent = last ? last.summary : "henüz uzlaştırma yok";
+
+  const kisan = (e.active || []).filter((r) => r.kind !== "mark");
+  const damga = (e.active || []).filter((r) => r.kind === "mark");
+  const satir = (r) => `<div class="row">
+      <span class="badge">${r.scope === "edge" ? "uçta" : "çekirdekte"}</span>
+      <span>${esc(r.describe)}</span></div>`;
+
+  $("#enforce-active").innerHTML =
+    (kisan.length ? kisan.map(satir).join("") : "") +
+    (damga.length
+      ? `<p class="empty">+ ${damga.length} sınıf damgası (kısıtlamaz, onay istemez)</p>`
+      : "") ||
+    '<p class="empty">Onaylanmış kısıtlayıcı kural yok.</p>';
+
+  const atlanan = last?.skipped || [];
+  $("#enforce-skipped").innerHTML = atlanan.length
+    ? atlanan.map((s) => `<div class="row">
+        <span class="badge">${esc(s.rule.kind)}</span>
+        <span>${esc(s.reason)}</span></div>`).join("")
+    : '<p class="empty">Yok — üretilen her kural sürücü tarafından karşılandı.</p>';
+
+  const cmds = last?.commands || [];
+  $("#enforce-cmds").innerHTML = cmds.length
+    ? cmds.map((c) => {
+        const cls = c.destructive ? "del" : (c.text.startsWith("#") ? "note" : "");
+        return `<span class="${cls}">${esc(c.text)}</span>`;
+      }).join(String.fromCharCode(10))
+    : '<span class="note">Son turda değişiklik yok — komut üretilmedi.</span>';
+}
+
 setInterval(refreshSlow, 5000);
 setInterval(refreshFast, 2000);
 </script>

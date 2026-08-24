@@ -4,9 +4,13 @@
 
 mode: simulation          # simulation | live   (live faz 2'de açılacak)
 
+# Hat kapasitesi. ⚠️ Bir `topology:` bloğu varsa bu değerler **oradan
+# türetiliyor** ve buradakiler yok sayılıyor — panel doluluğu ile çözücünün
+# darboğazı ayrışmasın diye (bir kez ayrıştılar). Elle tutmak istiyorsan
+# `topology:` bloğunu tamamen sil.
 link:
-  downlink_mbps: 200      # WAN indirme kapasitesi
-  uplink_mbps: 20         # WAN yükleme kapasitesi
+  downlink_mbps: 300
+  uplink_mbps: 40
   congestion_threshold: 0.80   # bu oranın üstü "tıkanma" sayılır
   critical_threshold: 0.94     # bu oranın üstü "kritik"
 
@@ -20,21 +24,48 @@ flow:
   interval_seconds: 15      # LP çözümü; eşik döngüsünden seyrek koşuyor
   min_pullback_mbps: 0.5    # bunun altındaki eksik "geri çek" sayılmıyor
 
-# Topoloji — yazılmazsa `link:` kapasitelerinden tek çıkışlı varsayılan kurulur.
-# Birden çok WAN çıkışın varsa buradan tanımla; çözücü trafiği aralarında
-# bölebilir, sayaçlı olanı en son kullanır, bozulanından kaçınır.
+# Topoloji — ağın gerçek şekli; çözücünün üzerinde çalıştığı grafik.
+#
+# **Optimizasyonun değeri buradan geliyor.** Tek çıkışlı bir ağda çözücünün
+# yapabileceği tek şey paylaştırmak: birinden alıp ötekine vermek, toplam
+# sabit kalır. Birden çok çıkış olunca boşta duran bacak kullanılıyor ve
+# kazanç gerçek oluyor. Ölçüldü (220 Mbps talep, 100 Mbps'lik bacaklar):
+#
+#     tek hat  -> 100 Mbps geçiyor  (%45)
+#     iki hat  -> 200 Mbps geçiyor  (%91)   = x2.00
+#
+# İki kullanım biçimi var:
+#
+# 1) `generate:` — tohumlu rastgele ama gerçekçi bir ağ üretir. Elle yazılmış
+#    tek bir topolojide çalışmak hiçbir şey kanıtlamıyor; sistemin işi *ne
+#    bulursa onda* çalışmak. Tohumu değiştir, ağ değişir, sistem çalışmaya
+#    devam eder.
+# 2) `edges:` — gerçek ağını birebir yaz (aşağıdaki örneğe bak).
+topology:
+  generate:
+    seed: 7            # aynı tohum = aynı ağ (tekrarlanabilirlik)
+    sites: 3           # uçtaki LAN sayısı (her biri access + dist router)
+    egresses: 2        # WAN çıkışı sayısı — 1 yaparsan kazanç sıfırlanır
+    downlink_mbps: 300 # tüm çıkışların toplamı
+    uplink_mbps: 40
+
+# Gerçek ağını elle yazmak istersen `generate:` yerine:
 #
 # topology:
 #   default_access: sw-access
+#   access_nodes: [access-1, access-2]   # cihazlar bunlara hash ile dağılır
 #   edges:
-#     - {src: sw-access, dst: sw-core,  capacity_mbps: 1000, kind: access}
-#     - {src: sw-core,   dst: sw-access, capacity_mbps: 1000, kind: access}
-#     - {src: sw-core,   dst: nvr,      capacity_mbps: 1000, kind: lan}
-#     - {src: nvr,       dst: sw-core,  capacity_mbps: 1000, kind: lan}
-#     - {src: sw-core,   dst: fiber,    capacity_mbps: 200, latency_ms: 8,  kind: wan}
-#     - {src: fiber,     dst: internet, capacity_mbps: 200, latency_ms: 8,  kind: wan}
-#     - {src: sw-core,   dst: lte,      capacity_mbps: 50,  latency_ms: 45, cost_per_gb: 4, kind: wan}
-#     - {src: lte,       dst: internet, capacity_mbps: 50,  latency_ms: 45, cost_per_gb: 4, kind: wan}
+#     - {src: access-1, dst: core,     capacity_mbps: 1000, kind: access}
+#     - {src: core,     dst: access-1, capacity_mbps: 1000, kind: access}
+#     - {src: core,     dst: nvr,      capacity_mbps: 1000, kind: lan}
+#     - {src: nvr,      dst: core,     capacity_mbps: 1000, kind: lan}
+#     # YÜKLEME: cihazdan internete
+#     - {src: core,     dst: fiber,    capacity_mbps: 20,  latency_ms: 8,  kind: wan}
+#     - {src: fiber,    dst: internet, capacity_mbps: 20,  latency_ms: 8,  kind: wan}
+#     # İNDİRME: internetten cihaza — yön fiziksel olarak doğru olmak zorunda
+#     - {src: internet, dst: fiber,    capacity_mbps: 200, latency_ms: 8,  kind: wan}
+#     - {src: fiber,    dst: core,     capacity_mbps: 200, latency_ms: 8,  kind: wan}
+#     # cost_per_gb: sayaçlı hatlar (LTE) — çözücü eşit koşulda ucuzu seçer
 #     # health: 0.0-1.0 — bozulan hattı silmek yerine daraltmak için
 
 optimizer:
@@ -60,6 +91,33 @@ ai:
   ollama_model: phi4-mini
   analysis_interval_seconds: 30   # AI analistin çalışma sıklığı
   max_snapshot_flows: 25
+
+# İnfaz katmanı — hesaplanan planı ağa taşıyan kısım.
+enforce:
+  enabled: true
+  # ⚠️ `golge` = komut üretilir, ÇALIŞTIRILMAZ. Canlı mod bilerek
+  # bağlanmadı: üzerinde doğrulama yapılabilecek gerçek bir cihaz yokken
+  # yazılan çalıştırma kodu "hazır" görünür ama sınanmamış olur.
+  mode: golge             # golge | canli (canli henüz bağlı değil)
+  # anlat  = Türkçe anlatır, cihaz gerektirmez (varsayılan, demo için)
+  # linux  = tc + ip rule + iptables komutları üretir
+  # windows= New-NetQosPolicy üretir (yalnız yükleme + damga yapabilir)
+  #
+  # Gerçek kurulumda ikisi birden: çekirdekte router, uçta Windows domain.
+  # core_driver: linux
+  # edge_driver: windows
+  #
+  # İkisi de boşsa aşağıdaki tek sürücü tüm kapsamlara bakar:
+  driver: anlat
+  # Kısan her kural (hız tavanı, yol ataması) operatör onayı bekler.
+  # Damgalar onay istemez: kimseyi kısmazlar, yalnız trafiği tanıtırlar.
+  require_approval: true
+  # linux sürücüsü için:
+  wan_if: eth1
+  lan_if: eth0
+  # tables:               # çıkış düğümü -> `ip route` tablo adı
+  #   wan-a: netpilot1    # tanımsız çıkış için yol kuralı üretilmez,
+  #   wan-b: netpilot2    # sessizce yanlış yapmaktansa "atlandı" der
 
 api:
   host: 127.0.0.1

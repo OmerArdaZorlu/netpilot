@@ -31,7 +31,12 @@ Simulator → Metrics → (Optimizer ‖ AI Analyst) → Controller → API + Pa
 | Foundry Local | `ntc/ai/foundry.py` | ✅ 2026-08-24'te gerçek serviste doğrulandı (3 kusur çıktı, düzeltildi) |
 | AI analisti | `ntc/ai/analyst.py` | ✅ snapshot, analiz, soru-cevap, normalizasyon |
 | Kalıcılık | `ntc/storage/db.py` | ✅ SQLite, 5 tablo, 24 saat saklama |
-| Orkestrasyon | `ntc/controller.py` | ✅ 4 async döngü |
+| Akış topolojisi | `ntc/traffic/topology.py` | ✅ yönlü kapasiteli grafik + tohumlu rastgele ağ üreteci; `link:` buradan türetiliyor |
+| Akış çözücüsü | `ntc/traffic/flowopt.py` | ✅ çok mallı akış LP'si, öncelik + asgari garanti |
+| İnfaz — politika | `ntc/enforce/policy.py` | ✅ cihazdan bağımsız kural nesneleri + onay köprüsü |
+| İnfaz — sürücüler | `ntc/enforce/drivers.py` | ✅ anlat / linux (`tc`) / windows (QoS); **komut metni** doğrulandı, cihaz davranışı doğrulanmadı |
+| İnfaz — uzlaştırıcı | `ntc/enforce/engine.py` | ✅ fark uygulama, gölge modu, kapanışta geri alma |
+| Orkestrasyon | `ntc/controller.py` | ✅ 5 async döngü |
 | API + WebSocket | `ntc/api/server.py` | ✅ |
 | Panel | `ntc/dashboard/index.html` | ⚠️ çalışıyor, **görsel olarak denetlenmedi** |
 | CLI | `ntc/cli.py` | ✅ serve / watch / analyze / ask / doctor |
@@ -56,6 +61,17 @@ python -m ntc serve       # panel: http://127.0.0.1:8080
   `analyze` → gerçek `/v1/chat/completions` yanıtı. Soğuk yol (model bellekte
   değilken) 43 sn, sıcak koşu 25-27 sn. Tembel yükleme ve çıkarım kilidi
   bellekten çıkarma testiyle doğrulandı.
+- İnfaz uçtan uca (2026-08-24, linux sürücüsü, tıkanma senaryosu):
+  onaysızken 0 kısan kural → operatör bir aksiyonu onaylayınca 1 kural /
+  2 `tc` komutu → ikinci turda 0 komut (fark yok) → onay geri alınınca
+  1 kaldırma → kapanışta 0 kural kaldı.
+- İnfaz birim testleri: `t_enforce.py` 16 senaryo, hepsi geçti.
+- **Optimizasyonun kazancı ölçüldü (2026-08-24):** 220 Mbps talep,
+  100 Mbps'lik bacaklar → tek hat 100 Mbps (%45), iki hat 200 Mbps (%91),
+  **x2.00**. 12 rastgele mimaride (9–17 düğüm, 1–5 site, 1–4 çıkış)
+  ortalama **x1.34**, en yüksek x1.63. Tek çıkışlı ağlarda x1.00 — orada
+  kazanılacak bir şey yok, çözücü yalnız paylaştırabilir.
+  (`t_random_topo.py`, 12 tohum, hepsi geçti.)
 
 ---
 
@@ -320,18 +336,151 @@ Server 2025 Evaluation (ücretsiz, 180 gün) / Azure VM / Win11 Pro yükseltme.
    (b) DSCP ile işaretleyip yol seçimini gerçek router/SD-WAN'a bırakmak.
    **Uygulama-farkında yönlendirmeyi saf Windows'ta vaat etme.**
 
+4b. **✅ İnfaz katmanı — gölge modda yazıldı ve doğrulandı** *(2026-08-24)*
+
+   Çözücünün *hedef durumunu* cihaz komutuna indiren üç katman. Ayrı
+   durmalarının sebebi aynı kararın iki dünyada tamamen farklı görünmesi:
+   `RateLimit(cam-entrance, down, 45)` Linux'ta bir `tc class`, Windows'ta
+   **imkânsız**.
+
+   | Dosya | Ne yapıyor |
+   |---|---|
+   | `ntc/enforce/policy.py` | **Ne** — cihazdan bağımsız kural nesneleri: `RateLimit`, `PathPin`, `Mark`. `policies_from_plan()` planı bunlara çeviriyor; `approved_keys()` operatör onayını kural anahtarına bağlıyor |
+   | `ntc/enforce/drivers.py` | **Nasıl** — `DescribeDriver` (Türkçe anlatır, cihaz gerektirmez), `LinuxTcDriver` (`tc` + `ip rule` + `iptables mangle`), `WindowsQosDriver` (`New-NetQosPolicy`) |
+   | `ntc/enforce/engine.py` | **Ne zaman** — `Enforcer.reconcile()`: istenen ile bilinen durumun farkını uygular |
+
+   **Kapsam başına ayrı sürücü.** Ağın iki yerine iki farklı dille yazıyoruz:
+   çekirdekteki router `tc` konuşuyor, uçtaki Windows domain
+   `New-NetQosPolicy`. `Enforcer` kuralı `scope` alanına göre doğru sürücüye
+   yolluyor (`enforce.core_driver` / `enforce.edge_driver`). Tek sürücüyle
+   çalışsaydık ya uçtaki damgalar ya çekirdekteki indirme kısıtları sessizce
+   düşerdi. Bir kapsamın sürücüsü tanımsızsa kural gerekçesiyle "atlandı"
+   oluyor, kurulmuş sayılmıyor. *(Ölçüldü: çekirdek kuralı `tc`, uç kuralı
+   `New-NetQosPolicy` üretti; uç sürücüsü yokken 1 atlandı, 0 aktif.)*
+
+   **Kapsam (`scope`) fizikten geliyor, tercihten değil.** `edge` = uç
+   makine / erişim anahtarı: yüklemeyi kısabilir, DSCP vurabilir. `core` =
+   router kesişimi: indirme kısıtı ve yol seçimi ancak burada anlamlı.
+   `scope` "en erken nerede yapılabilir" demek, "yalnız orada" değil —
+   router yüklemenin de yukarısında durduğu için `edge` kuralını da
+   uygulayabiliyor. *(Bir gün "tutarlılık için" uzlaştırıcıya kapsam filtresi
+   eklenirse router'ın yükleme kısıtları sessizce düşer.)*
+
+   **Neden sil-kur değil fark:** çözücü 15 sn'de bir yeni plan üretiyor. Her
+   turda hepsini silip kursaydık (a) sil ile kur arasındaki boşlukta, tam
+   tıkanma anında vana tamamen açılırdı, (b) değişmeyen kural için de cihaza
+   komut giderdi. Her kuralın iki kimliği var: `key` (kimlik) ve
+   `fingerprint` (kimlik + değer). Tavan 0.1 Mbps'e yuvarlanıyor — yoksa
+   ölçüm gürültüsü her turda "değişti" dedirtirdi. *(Ölçüldü: 30.04 Mbps
+   değişimi yok sayıldı.)*
+
+   **Onay kapısı.** Kısan her kural (`rate`, `path`) `applied` bayrağı
+   olmadan kurulmuyor; damgalar (`mark`) kurulmadan geçiyor çünkü kimseyi
+   kısmıyorlar. Onay geri alınınca kural da kalkıyor — ayrı bir "geri al"
+   yoluna gerek yok. *(Ölçüldü: onaysız kısan kural sayısı 0; onaydan sonra
+   1 kural + 2 komut; onay geri alınınca 1 kaldırma.)*
+
+   **Yapılamayan sessizce atlanmıyor.** Windows QoS indirmeyi kısamaz ve yol
+   seçemez; sürücü yaklaşık komut üretmek yerine gerekçeli `UnsupportedRule`
+   fırlatıyor. Atlanan kural **aktif sayılmıyor**, bir sonraki turda yeniden
+   deneniyor — "kuruldu" diye yazsaydık sonsuza kadar uygulanmamış kalırdı.
+
+   **443 belirsizliği tahminle doldurulmuyor.** Katalogda beş uygulama 443'te
+   ve dördü farklı sınıfta. "443 → interactive" damgası yazmak, tıkanmayı
+   yaratan Windows Update'e en yüksek etkileşimli önceliği vermek olurdu.
+   `class_selectors()` yalnız **tek sınıfa ait** portları üretiyor; belirsiz
+   olanlar ayrı listede duruyor ve uygulama-yolu eşleşmesi isteyen, operatörün
+   tamamlayacağı kural olarak işaretleniyor.
+
+   **⛔ Canlı mod bilerek bağlanmadı.** `Enforcer(mode="canli")` bir `runner`
+   şart koşuyor ve hiçbir yerde verilmiyor. Üzerinde doğrulama yapabileceğimiz
+   cihaz yokken yazılan `subprocess.run` kodu "infaz hazır" sanılırdı. **Komut
+   metni** teste karşı doğrulandı; **komutun cihazdaki davranışı** doğrulanmadı.
+   Bu ayrımı bulanıklaştırma.
+
+   Kapanışta `rollback()` çağrılıyor — sahipsiz kalan bir hız tavanı en kötü
+   arıza biçimi: sebebi görünmez, kimse kaldırmaz.
+
+   **⚠️ Gerçek router işletim sistemi sürücüsü yok.** `LinuxTcDriver` bir
+   Linux/VyOS router'a uyuyor; Cisco IOS, MikroTik RouterOS veya switch CLI
+   için sürücü yazılmadı. Hangi cihaz olduğu netleşince o sürücü eklenmeli —
+   politika ve uzlaştırma katmanları değişmeden kalır, çeviri tablosu
+   `drivers.py`'ye bir sınıf olarak girer.
+
+   Doğrulama: `t_enforce.py` 16 senaryo + `t_enforce_scope.py` 9 senaryo,
+   hepsi geçti. Uçtan uca çalıştırma
+   (linux sürücüsü, tıkanma senaryosu) 5 adımda doğrulandı. API:
+   `/api/enforce/state`, `/api/enforce/policies`, `/api/enforce/preview`.
+   Panelde "İnfaz" kartı: kurulu kurallar, atlananlar gerekçesiyle, üretilen
+   komutlar.
+
+4g. **✅ Topoloji üreteci — sistem elle yazılmış ağa bağlı değil** *(2026-08-24)*
+
+   **Neden:** `Topology.default()` tek hat modelliyordu (daha önce uydurma
+   kapasite koyup paneli yalanladığı için öyle kilitlenmişti), ama çoklu çıkış
+   hiçbir zaman yapılandırmaya yazılmadı. Sonuç: demo tek hatta koşuyordu ve
+   optimize edici hiçbir şeyi hızlandıramıyordu — yalnız paylaştırıyordu.
+   Kullanıcı bunu haklı olarak "işe yaramıyor" diye gördü.
+
+   `Topology.generate(seed, sites, egresses, downlink_mbps, uplink_mbps)`
+   tohumlu, gerçekçi bir ağ üretiyor:
+
+   ```
+   cihazlar ─► access-1 ─► dist-1 ─┐
+                                   ├─► core ─┬─► cikis-1 ─► internet
+   cihazlar ─► access-2 ─► dist-2 ─┘         └─► cikis-2 ─► internet
+   ```
+
+   Aynı tohum aynı ağı veriyor (tekrarlanabilirlik), farklı tohum farklı
+   şekil (genellik). `config.yaml` içinde `topology.generate:` bloğu varsayılan;
+   gerçek ağ `edges:` ile birebir yazılabiliyor, o yol da korundu.
+
+   **Cihazlar tek anahtara toplanmıyor.** `attach_point()` cihaz adını kararlı
+   hash ile erişim düğümlerine dağıtıyor — envanter tablosu tutmadan. Hepsini
+   tek anahtara bağlamak, gerçekte var olmayan bir darboğaz uydurmak olurdu.
+
+   **`link:` artık topolojiden türetiliyor** (`wan_capacity()`). Panel doluluğu
+   ile çözücünün darboğazının ayrışması bir kez oldu (panel "%92 dolu",
+   çözücü "darboğaz yok"); artık kuralı yorumla değil **yapıyla** koruyoruz —
+   ayrışması imkânsız.
+
+   Doğrulama: `t_random_topo.py` 12 rastgele mimaride tüm zinciri
+   (çözücü → aksiyon → politika → infaz) koşturuyor; hiçbir katman düğüm adı
+   varsaymıyor, hiçbiri düşmedi, hiçbir kural atlanmadı.
+
 ### Tasarımı konuşuldu, kodu yazılmadı
 
-4b. **İnfaz katmanı — çözücünün kararını uygulayan taraf**
-
-   Optimize edici bir *hedef durum* üretiyor; onu uygulayan hiçbir şey yok.
-   `applied` alanı yalnızca bir boolean, tüketen kod yok. Kilitli karar QoS
-   için `Set-NetQosPolicy`.
+4c. **Cache kaydı boşluğu**
 
    **⚠️ Kayıt boşluğu:** kullanıcı "ağın girişinde ortak bir cache, AI ona
    göre önceliklendirir" diye bir tasarım hatırlıyor; bunun kaydı hiçbir
    yerde yok (kod, bu dosya, README, git geçmişi arandı). Kuyruk mu içerik
    önbelleği mi olduğu netleşmedi. **Netleşince buraya yaz.**
+
+4d. **Talep tahmini — AI'ın rolü netleşti (2026-08-24)**
+
+   Kullanıcıya soruldu: AI *tahmin* mi yapacak yoksa *mevcut durumu* mu
+   yorumlayacak? Cevap: **mevcut durumu yorumlamak.** Yani AI zincirin
+   içinde değil yanında duruyor; sayıyı çözücü veriyor, AI operatöre
+   anlatıyor. Bu karar `prompts.py`'deki mevcut tasarımla uyumlu, değişiklik
+   gerektirmiyor.
+
+   Eğilim tahmini (*"20 dk sonra hat dolacak"*) yine de açık bir borç ama
+   **modelin işi değil**: `db.py` 24 saatlik zaman serisini tutuyor ve
+   kullanılmıyor; eğilim oradan regresyonla çıkar, AI çıkanı yorumlar.
+
+4e. **Talep ölçülemiyor — doygun hatta ölçülen hız zaten tavan**
+
+   Şu an `demands_from_signals()` ölçülen hızı talep sanıyor. Hat doluyken
+   bu yanlış: 200 Mbps isteyen bir cihaz 50 Mbps ölçülür ve çözücü onu
+   "memnun" görür. Konuşulan çözüm: cihaz başına profil (boş saat gözlemi +
+   toplam transfer boyutu). Kodu yazılmadı.
+
+4f. **Trafik sınıflandırma — DPI'sız katmanlı**
+
+   Sıra: süreç adı (Sysmon Event 3) → hedef IP aralığı → port → akış şekli
+   → bilinmiyorsa "interactive". Doğruluğu simülatörün kendi etiketlerine
+   karşı ölçülebilir. Kodu yazılmadı.
 
 ### Lab gerektiriyor
 

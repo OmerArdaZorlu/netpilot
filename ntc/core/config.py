@@ -57,6 +57,36 @@ class FlowConfig:
 
 
 @dataclass
+class EnforceConfig:
+    """İnfaz katmanı ayarları.
+
+    ⚠️ `mode` varsayılanı `golge` ve öyle kalmalı. Canlı mod ancak üzerinde
+    doğrulama yapılabilecek gerçek bir cihaz varken açılmalı; o cihaz
+    olmadan üretilen komutların doğruluğu yalnız *metin* olarak sınandı,
+    davranış olarak değil.
+    """
+
+    enabled: bool = True
+    mode: str = "golge"                 # golge | canli
+    # **Kapsam başına ayrı sürücü.** Ağın iki yerine iki farklı dille
+    # yazıyoruz: çekirdekteki router `tc`, uçtaki Windows domain
+    # `New-NetQosPolicy`. Tek sürücü seçseydik biri sessizce düşerdi.
+    #   core = router kesişimi  → indirme kısıtı + yol seçimi
+    #   edge = Windows domain uç → yükleme kısıtı + DSCP damgası
+    core_driver: str = ""               # boş = `driver` alanına düş
+    edge_driver: str = ""
+    # Her ikisi de boşsa bu tek sürücü tüm kapsamlara bakar.
+    driver: str = "anlat"               # anlat | linux | windows
+    # Kısan her kural operatör onayı bekler. Kapatmak, halüsinasyon değil
+    # ama yine de denetimsiz bir kısıt akışı demek — bilerek açık bırakıldı.
+    require_approval: bool = True
+    # Linux sürücüsü için arayüz adları ve çıkış → yönlendirme tablosu.
+    wan_if: str = "eth1"
+    lan_if: str = "eth0"
+    tables: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
 class AIConfig:
     provider: str = "auto"          # auto | foundry | ollama | mock
     model: str = "phi-4-mini"       # Foundry Local takma adı
@@ -109,6 +139,7 @@ class Config:
     storage: StorageConfig = field(default_factory=StorageConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     flow: FlowConfig = field(default_factory=FlowConfig)
+    enforce: EnforceConfig = field(default_factory=EnforceConfig)
     # Topoloji düz bir dataclass değil (kenar listesi), o yüzden ham
     # haliyle taşınıp `Topology.from_config` tarafından ayrıştırılıyor.
     topology_raw: dict[str, Any] | None = None
@@ -153,6 +184,7 @@ _NESTED = {
     "storage": StorageConfig,
     "logging": LoggingConfig,
     "flow": FlowConfig,
+    "enforce": EnforceConfig,
 }
 
 
