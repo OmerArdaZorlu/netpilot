@@ -22,9 +22,12 @@ from ..core.models import (
 from ..traffic.metrics import MetricsEngine
 from ..traffic.optimizer import TrafficOptimizer
 from ..traffic.flowpolicy import DEFAULT_POLICY, FlowPolicy
+from .flowai import AIFlowPlan, demand_rows, egress_rows, score, validate
 from .prompts import (
     ANALYST_SYSTEM,
     ANALYST_USER,
+    FLOW_SYSTEM,
+    FLOW_USER,
     POLICY_SYSTEM,
     POLICY_USER,
     QA_SYSTEM,
@@ -306,6 +309,84 @@ class AIAnalyst:
 
         politika.source = "ai"
         return politika, sorunlar, "kabul"
+
+    # ------------------------------------------------------------ akış (AI)
+
+    async def propose_flow(self, topology: Any, demands: list[Any],
+                           clock_hour: int | None = None
+                           ) -> tuple[Any, list[Any], dict[str, Any]]:
+        """**Akışı modelin kendisine kurdurur.**
+
+        Politika yolundan farkı: orada model hedefi kuruyor, sayıyı LP
+        hesaplıyordu. Burada sayıyı model veriyor; LP karar verici değil
+        hakem — planı ölçüyor, gerekirse onarıyor, model hiçbir şey
+        üretemezse yedek olarak devreye giriyor.
+
+        Döner: (AIFlowPlan, modele gitmeyen talepler, ham istem bilgisi).
+
+        Model çıktısı **hiçbir koşulda doğrudan uygulanmıyor**:
+        `flowai.validate()` üç kısıttan geçiriyor (talebi aşma, kapasiteyi
+        aşma, var olmayan cihaz/bacak) ve müdahalesini `repair_ratio` ile
+        ölçülebilir bırakıyor. O oran yüksekse karar modelin değil
+        doğrulayıcının demektir — bunu gizlemek "AI karar veriyor"u
+        doğrulanamaz bir iddiaya çevirirdi.
+        """
+        rows, kalanlar = demand_rows(demands)
+        legs = egress_rows(topology)
+        plan = AIFlowPlan()
+
+        if self.provider is None or not rows or not legs:
+            plan.issues.append("sağlayıcı, talep ya da çıkış bacağı yok")
+            return plan, list(demands), {}
+
+        saat = clock_hour if clock_hour is not None else time.localtime().tm_hour
+        gun = ("mesai saati" if 8 <= saat < 19
+               else "akşam" if 19 <= saat < 23 else "gece, ofis boş")
+
+        kap_down = sum(b.get("down_mbps", 0.0) for b in legs)
+        kap_up = sum(b.get("up_mbps", 0.0) for b in legs)
+        istek_down = sum(r["want_mbps"] for r in rows if r["direction"] == "down")
+        istek_up = sum(r["want_mbps"] for r in rows if r["direction"] == "up")
+
+        bacak_metin = "\n".join(
+            f"- {b['name']}: indirme {b.get('down_mbps', 0):.0f} Mbps, "
+            f"yükleme {b.get('up_mbps', 0):.0f} Mbps, "
+            f"{b.get('latency_ms', 0):.0f} ms"
+            + (", SAYAÇLI" if b.get("metered") else "")
+            + ("" if b.get("healthy", True) else ", BOZUK")
+            for b in legs)
+        # Her satır kısa bir kimlikle gidiyor ve model kimlikle cevap veriyor.
+        # Cihaz adını / yönü / sınıfı yeniden yazdırmak ölçülen bir hata
+        # kaynağıydı: model `lan`'ı `down` yazıyor, bacak alanına `indirme`
+        # koyuyordu. Yazdırmadığı şeyi yanlış yazamaz.
+        istek_metin = "\n".join(
+            f"- {r['id']}: {r['device']} ({r['direction']}, {r['class']}) "
+            f"istiyor {r['want_mbps']:.1f} Mbps" for r in rows)
+        istek_metin += ("\n\nGeçerli bacak adları: "
+                        + ", ".join(b["name"] for b in legs))
+
+        user = FLOW_USER.format(
+            saat=f"{saat:02d}:00 ({gun})", bacaklar=bacak_metin,
+            kap_down=f"{kap_down:.0f}", kap_up=f"{kap_up:.0f}",
+            istekler=istek_metin,
+            istek_down=f"{istek_down:.0f}", istek_up=f"{istek_up:.0f}")
+
+        try:
+            data = await self.provider.complete_json(FLOW_SYSTEM, user)
+        except Exception as exc:
+            log.warning("Akış önerisi alınamadı: %s", exc)
+            plan.issues.append(f"model yanıt vermedi: {exc}")
+            return plan, list(demands), {"rows": rows, "legs": legs}
+
+        plan = validate(data, rows, legs)
+        # Modelin hiç dokunmadığı talepler LP'ye gidiyor: bir talebi
+        # yanıtlamamak "sıfır ver" demek değil, "karar vermedim" demek.
+        yanitlanan = {g.key for g in plan.grants}
+        atlanan = [d for d in demands
+                   if f"{d.device}|{d.direction}|{d.traffic_class.value}"
+                   not in yanitlanan]
+        return plan, atlanan, {"rows": rows, "legs": legs,
+                               "kap_down": kap_down, "kap_up": kap_up}
 
     def _situation(self, metrics: MetricsEngine, topology: Any,
                    alerts: list[Alert] | None,

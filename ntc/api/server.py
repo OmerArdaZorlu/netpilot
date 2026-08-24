@@ -129,6 +129,32 @@ def create_app(cfg: Config | None = None) -> FastAPI:
     async def flow_topology():
         return controller.topology.to_dict()
 
+    @app.get("/api/flow/ai")
+    async def flow_ai():
+        """Modelin son akış önerisi ve akışın ne kadarının onun kararı olduğu.
+
+        `share` alanı iddiayı ölçülebilir tutuyor: 0.22 ise geçen trafiğin
+        %22'sini model belirledi, gerisini LP doldurdu. `repair_ratio` ise
+        doğrulayıcının ne kadarını yeniden yazdığını söylüyor — yüksekse
+        karar modelin değil doğrulayıcının demektir.
+        """
+        if controller.ai_flow is None:
+            return {"enabled": controller.cfg.ai.flow_enabled,
+                    "note": "henüz öneri yok"}
+        return {"enabled": controller.cfg.ai.flow_enabled,
+                "share": round(controller.ai_flow_share, 4),
+                **controller.ai_flow.to_dict()}
+
+    @app.get("/api/flow/demand")
+    async def flow_demand():
+        """Talep profilleri: hangi cihazın boş saatte ne kadar çektiği.
+
+        Çözücüye giden "talep" sayısının nereden geldiğini gösteriyor.
+        Doygun hatta ölçülen hız zaten tavandır; bu tablo o tavanın
+        arkasındaki gerçek isteği taşıyor.
+        """
+        return controller.demand_estimator.to_dict()
+
     @app.get("/api/flow/policy")
     async def flow_policy():
         """Çözücünün şu anki **hedefi** — kim koydu, neden, neyi değiştirdi.

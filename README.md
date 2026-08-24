@@ -153,6 +153,18 @@ tutulduğu için bir kez ayrıştılar ve panel "%92 dolu" derken çözücü "da
 yok" dedi. Artık `link:` topolojiden türetiliyor — kuralı yorumla korumak
 yerine yapıyla koruyoruz.
 
+**Ölçülen hız, doygun hatta talebin kendisi değildir.** Bir cihaz 200 Mbps
+isterken hat doluysa 33 Mbps ölçülür — ve o sayıyı "talep" saymak sistemi tam
+da tıkanma anında körleştirir: "33 istedi, 33 verdim, memnun". `demand.py`
+hat **boşken** ölçülen değerleri cihaz başına tepe olarak saklıyor ve hat
+dolduğunda oradan okuyor. Ölçüldü (gerçeği bildiğimiz kurguda): toplam mutlak
+hata 200.0 → **0.0 Mbps**, görülen eksik 0 → **200 Mbps**.
+
+Tepeyi körlemesine kullanmıyoruz: düşük ölçümün iki zıt sebebi olabilir
+(cihaz kısıtlanıyor / cihaz boşta) ve ayırt eden sinyal **adil payına
+dayanmış mı** olduğu. Sinyal yoksa şişirme yapılmıyor — ayıramadığımızda
+hayali talep üretmek başkasının payını çalmak demek.
+
 **Eşik denetimi ile optimizasyon ayrı işlerdir.** `optimizer.py` bir
 termostattır: doluluk eşiği aşınca politika taslağı üretir. `flowopt.py` ise
 gerçek bir optimizasyon yapar — talepleri topolojinin kenarlarına dağıtan çok
@@ -188,7 +200,22 @@ göre yönlendirir). Sürücü bunlara yaklaşık bir komut üretmek yerine gere
 yazılı bir "atlandı" kaydı bırakıyor; kural aktif sayılmıyor ve bir sonraki
 turda yeniden deneniyor.
 
-**AI çözücünün hedefini kurar — sayısını değil.** Çözücü verilen hedefe göre
+**Akışı AI kurar, LP hakemlik eder.** Model her isteğe kaç Mbps verileceğine
+ve hangi bacaktan akacağına kendisi karar veriyor; çıktısı üç kısıttan
+geçiriliyor (talebi aşma, kapasiteyi aşma, var olmayan cihaz/bacak) ve
+çözücünün ilk turuna giriyor. LP karar verici değil: modelin kararını ağa
+oturtuyor, yanıtsız kalanı dolduruyor, kapasiteyi aştırmıyor.
+
+```
+topoloji + talepler ──► AI ──► doğrulayıcı ──► LP (hakem) ──► akış
+```
+
+Ölçüldü: model **tek başına** optimumun %22'sini geçiriyor; hibritte kayıp
+**0.0 Mbps** ve akışın %54–89'u modelin kararı. Satırlara kimlik verip
+kimlikle cevap istemek payı %16–24'ten %54–89'a çıkardı — model cihaz adını
+yeniden yazarken `lan`'ı `down`, bacak adını `indirme` yazıyordu.
+
+**AI çözücünün hedefini de kurar — sayısını değil.** Çözücü verilen hedefe göre
 matematiksel olarak en iyi cevabı bulur, ama *hedefin kendisi* bir olgu değil
 karar: "realtime her zaman bulk'u yener" gece 03:00'te yanlış, "gecikme
 paradan baskın" sayaçlı hat devredeyken yanlış. Bu kararlar `flowopt.py`
@@ -273,6 +300,8 @@ curl -X POST http://127.0.0.1:8080/api/sim/scenario \
 | `GET /api/flow/plan` | Son akış çözümü: tahsisler, geri çekmeler, darboğazlar |
 | `POST /api/flow/solve` | Beklemeden yeniden çöz |
 | `GET /api/flow/topology` | Topoloji grafiği (düğümler + kenarlar) |
+| `GET /api/flow/ai` | Modelin son akış önerisi + akışın ne kadarı onun kararı |
+| `GET /api/flow/demand` | Talep profilleri: hangi cihaz boş saatte ne çekiyor |
 | `GET /api/flow/policy` | Çözücünün şu anki hedefi: kim koydu, neden, son turda ne oldu |
 | `POST /api/flow/policy/refresh` | Hedefi beklemeden yeniden kur |
 | `GET /api/enforce/state` | İnfaz durumu: sürücü, mod, kurulu kurallar, son uzlaştırma |

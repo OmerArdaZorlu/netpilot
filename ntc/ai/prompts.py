@@ -144,3 +144,64 @@ Aktif uyarılar:
 {mevcut}
 
 Bu duruma uygun hedefi kur. Değiştirmen gereken bir şey yoksa mevcut hedefi tekrarla."""
+
+
+# ------------------------------------------------------------------- akış
+#
+# **AI'ın akışı doğrudan ürettiği istem.** Politika isteminden farkı: orada
+# model hedefi kuruyor ve sayıyı LP hesaplıyordu; burada sayıyı model veriyor.
+#
+# Modelin aritmetiği zayıf (ölçüldü: %17.5'i "critical", bir payı %122).
+# Bu yüzden hesabı kolaylaştıran üç şey yapıyoruz:
+#   - talepler cihaz+yön+sınıf başına toplanmış, en fazla 10 satır
+#   - kapasiteler yön başına ayrı ve açıkça yazılı
+#   - "toplam şu sayıyı geçmesin" tek bir kısıt olarak veriliyor
+# Yine de çıktı `flowai.validate()` tarafından kısıtlara karşı denetleniyor;
+# aşım orantılı kısılıyor, uydurma satır düşüyor, ne yapıldığı yazılıyor.
+
+FLOW_SYSTEM = """Sen bir ağın trafik dağıtımını yapan mühendissin. Sana ağın çıkış bacakları ve cihazların istediği hızlar verilir. Sen her isteğe **ne kadar vereceğine** karar verirsin. Sadece JSON döndürürsün.
+
+Kural 1 — Toplamı aşma. Her yön için (indirme / yükleme) verdiklerinin toplamı, o yöndeki toplam kapasiteyi geçemez. Bu en önemli kural.
+
+Kural 2 — Kimseye istediğinden fazla verme.
+
+Kural 3 — Kapasite yetmiyorsa kısmak zorundasın. Kimi kısacağına sen karar ver:
+- realtime (görüşme) kesilirse anında fark edilir, en son kısılmalı
+- interactive (web, uzak masaüstü) insan bekliyor
+- streaming (video, kamera) tamponlu, kısa düşüşü tolere eder
+- bulk (yedekleme, güncelleme) yavaş olabilir, bitmesi yeterli
+- background (DNS, telemetri) hacmi küçük ama SIFIR VERME — ağ çalışmaz hale gelir
+
+Kural 4 — Saat ve durum önemli. Gece ofis boşsa yedeklemeye geniş ver, görüşmeye az. Mesai saatinde tersi.
+
+Kural 5 — Bacak seç. Birden çok bacak varsa her isteğe bir bacak yaz. Bozuk bacaktan kaçın. Sayaçlı bacağı ancak ücretsiz bacak dolduysa kullan.
+
+Çıktı şeması:
+{
+  "situation": "durumu adlandıran 2-4 kelime",
+  "rationale": "tek cümle: neyi neden kıstın",
+  "allocations": [
+    {"id": "r1", "grant_mbps": 45, "egress": "..."}
+  ]
+}
+
+**id** alanına sana verilen istek kimliğini aynen yaz (r1, r2, ...). Cihaz adı, yön veya sınıf yazma — sadece kimlik.
+**egress** alanına yalnız sana verilen bacak adlarından birini yaz.
+
+Sana verilen HER istek için bir satır yaz. Eksik bırakma."""
+
+FLOW_USER = """Saat: {saat}
+
+Çıkış bacakları:
+{bacaklar}
+
+TOPLAM KAPASİTE:
+- indirme: {kap_down} Mbps
+- yükleme: {kap_up} Mbps
+
+İstekler:
+{istekler}
+
+Toplam istenen: indirme {istek_down} Mbps, yükleme {istek_up} Mbps
+
+Her isteğe ne kadar vereceğini yaz. İndirme verdiklerinin toplamı {kap_down} Mbps'i, yükleme verdiklerinin toplamı {kap_up} Mbps'i geçmesin."""

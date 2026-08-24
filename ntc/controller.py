@@ -9,6 +9,7 @@ from collections import deque
 from typing import Any
 
 from .ai.analyst import AIAnalyst, AIReport
+from .ai.flowai import pins_for
 from .ai.provider import LLMProvider, create_provider
 from .core.bus import (
     TOPIC_ACTION,
@@ -43,6 +44,7 @@ from .enforce import (
     build_driver,
     policies_from_plan,
 )
+from .traffic.demand import DemandEstimator
 from .traffic.flowpolicy import DEFAULT_POLICY, FlowPolicy
 from .traffic.optimizer import TrafficOptimizer
 from .traffic.topology import Topology
@@ -87,7 +89,13 @@ class Controller:
         self.flow_policy: FlowPolicy = DEFAULT_POLICY
         self.policy_note: str = "başlangıç"
         self.policy_issues: list[str] = []
+        # Modelin son akış önerisi ve akışın ne kadarının onun kararı olduğu.
+        self.ai_flow: Any = None
+        self.ai_flow_share: float = 0.0
         self.flow_optimizer = FlowOptimizer(self.topology, self.flow_policy)
+        # Talep tahmini — doygun hatta ölçülen hız zaten tavandır ve onu
+        # "talep" saymak sistemi tam da tıkanma anında körleştiriyordu.
+        self.demand_estimator = DemandEstimator()
         self.flow_plan: FlowPlan | None = None
         # Akışları planın oranlarına göre çıkışlara dağıtır.
         self.path_assigner = PathAssigner()
@@ -309,14 +317,55 @@ class Controller:
         signals = self.metrics.device_signals()
         if not signals:
             return None
-        demands = demands_from_signals(signals, self.simulator.devices,
-                                       self.topology)
+        # Aktif hız tavanlarımız tahminciye en sağlam kanıt: ölçüm tavana
+        # yapışmışsa cihaz bastırılıyordur ve talebi tavanın üstündedir.
+        tavanlar: dict[tuple[str, str], float] = {}
+        for a in self.optimizer.active.values():
+            if a.kind.value != "rate_limit":
+                continue
+            h = (a.params or {}).get("hostname")
+            y = (a.params or {}).get("direction")
+            c = (a.params or {}).get("cap_mbps")
+            if h and y and c:
+                tavanlar[(h, y)] = float(c)
+
+        demands = demands_from_signals(
+            signals, self.simulator.devices, self.topology,
+            estimator=self.demand_estimator,
+            link_stats=self.metrics.link_stats(),
+            congestion_threshold=self.cfg.link.congestion_threshold,
+            active_caps=tavanlar)
         if not demands:
             return None
 
+        # --- AI akışı kendisi kuruyor ---
+        #
+        # Zincirin başında model duruyor: tahsisleri `pinned` olarak çözücünün
+        # 0. turuna giriyor, LP kalanı dolduruyor. Model çökerse, geçersiz
+        # üretirse ya da kapalıysa `pins` boş kalır ve çözücü eskisi gibi
+        # tek başına çalışır — kayıp yok, yalnız karar payı sıfırlanır.
+        pins: dict[str, float] = {}
+        self.ai_flow = None
+        if self.cfg.ai.flow_enabled and self.analyst is not None:
+            try:
+                ai_plan, _atlanan, _ = await self.analyst.propose_flow(
+                    self.topology, demands)
+                self.ai_flow = ai_plan
+                if ai_plan.valid:
+                    pins = pins_for(ai_plan, demands)
+            except Exception:
+                log.exception("AI akış önerisi alınamadı; LP tek başına çözecek")
+
         # LP saf CPU işi; olay döngüsünü kilitlememesi için ayrı iş parçacığında.
         plan = await asyncio.to_thread(self.flow_optimizer.solve, demands,
-                                       self.flow_policy)
+                                       self.flow_policy, pins)
+        if pins:
+            ai_pay = sum(min(pins.get(a.demand.key, 0.0), a.granted_mbps)
+                         for a in plan.allocations)
+            toplam = sum(a.granted_mbps for a in plan.allocations)
+            self.ai_flow_share = ai_pay / toplam if toplam > 0 else 0.0
+        else:
+            self.ai_flow_share = 0.0
         self.flow_plan = plan
         self.path_assigner.update(plan)
         await self.storage.save_flow_plan(new_id("flw"), now(), plan)

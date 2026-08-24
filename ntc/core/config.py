@@ -101,6 +101,12 @@ class AIConfig:
     policy_enabled: bool = True
     # Analizden seyrek: hedefi her 30 saniyede savurmak ağı sallar.
     policy_interval_seconds: float = 120.0
+    # **Akışı doğrudan modele kurdurma.** Politika yolunda model hedefi
+    # kuruyor, sayıyı LP hesaplıyordu; burada sayıyı model veriyor ve LP
+    # hakem oluyor: kalanı dolduruyor, kapasiteyi aştırmıyor.
+    # Ölçüldü: model tek başına optimumun %22'si, hibritte kayıp 0 ve akışın
+    # %16-24'ü modelin kararı.
+    flow_enabled: bool = True
     max_snapshot_flows: int = 25
     # İstem uzunluğuna sert tavan. Model bağlamı 4096 token; `lm_head` çıktısı
     # istemle birlikte büyüyor ve yük altında ONNX Runtime 1.2 GB ayırmaya

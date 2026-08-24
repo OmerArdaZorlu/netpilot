@@ -33,6 +33,7 @@ Simulator → Metrics → (Optimizer ‖ AI Analyst) → Controller → API + Pa
 | Kalıcılık | `ntc/storage/db.py` | ✅ SQLite, 5 tablo, 24 saat saklama |
 | Akış topolojisi | `ntc/traffic/topology.py` | ✅ yönlü kapasiteli grafik + tohumlu rastgele ağ üreteci; `link:` buradan türetiliyor |
 | Akış çözücüsü | `ntc/traffic/flowopt.py` | ✅ çok mallı akış LP'si; hedefi artık sabit değil, `flowpolicy` üzerinden geliyor |
+| Talep tahmini | `ntc/traffic/demand.py` | ✅ boş saat tepesi + baskı ayrımı; ölçüm hatası 200 → 0 Mbps |
 | Akış politikası | `ntc/traffic/flowpolicy.py` | ✅ çözücünün hedefi + doğrulama kapısı; AI'ın sisteme dokunduğu tek yer |
 | İnfaz — politika | `ntc/enforce/policy.py` | ✅ cihazdan bağımsız kural nesneleri + onay köprüsü |
 | İnfaz — sürücüler | `ntc/enforce/drivers.py` | ✅ anlat / linux (`tc`) / windows (QoS); **komut metni** doğrulandı, cihaz davranışı doğrulanmadı |
@@ -499,6 +500,114 @@ Server 2025 Evaluation (ücretsiz, 180 gün) / Azure VM / Win11 Pro yükseltme.
    ama görmüyor. Denenecek: daha büyük model, ya da sayaçlı hat varlığını
    ayrı bir alan olarak sormak.
 
+4i. **🔴→✅ Taban ölçeği topolojiye göre bozuktu** *(2026-08-25)*
+
+   Kullanıcı sordu: *"o varsayılanın her farklı topolojide doğru verdiğine
+   emin misin?"* — emin değildim ve haklı çıktı.
+
+   `_floors()` bütün tabanları `_egress_capacity()` ile ölçekliyordu; o da
+   yalnız `dst == internet` kenarlarını topluyor, **yani sadece yükleme**.
+   İndirme kenarları `internet → wan` yönünde olduğu için filtreye hiç
+   takılmıyordu.
+
+   | hat | eski background tabanı | doğrusu | kat |
+   |---|---|---|---|
+   | 200/20 (ev) | 0.4 Mbps | 4.0 Mbps | 10.0x |
+   | 300/40 (varsayılan) | 0.8 Mbps | 6.0 Mbps | 7.5x |
+   | 1000/100 (kurumsal) | 2.0 Mbps | 20.0 Mbps | 10.0x |
+   | **100/100 (simetrik)** | **2.0 Mbps** | **2.0 Mbps** | **1.0x** |
+
+   **Simetrik ağda doğru çalışıyordu, o yüzden fark edilmemişti.** Test
+   topolojilerinin çoğu simetrikti; asimetri gerçek internet hatlarının
+   tanımlayıcı özelliği ve hata tam orada ortaya çıkıyordu.
+
+   En kötü tarafı: bozulan şey, "en düşük öncelikli sınıf asla aç kalmasın"
+   diye özellikle konmuş olan taban. DNS/keepalive sınıfı pratikte açtı.
+
+   LAN talepleri daha da kötüydü — hedefleri internet bile değilken internet
+   çıkış kapasitesine göre ölçekleniyorlardı.
+
+   Düzeltme: `_capacity_for(direction, lan_dst)` — taban ölçeği yöne göre
+   (indirme / yükleme / LAN hedefi). `_floors()` yön başına ayrı bütçe
+   kuruyor. `t_floors.py` beş farklı hat oranında doğruluyor.
+
+4j. **✅ AI akışı DOĞRUDAN kuruyor — `AI → ... → flow`** *(2026-08-25)*
+
+   Kullanıcı defalarca söyledi, ben defalarca yanlış kurdum: *"aradaki yol
+   önemsiz ama AI → ... → flow, böyle OLACAK."* Politika katmanı (4h) AI'ı
+   bir ayar düğmesi yapıyordu; akışı LP kuruyordu. Bu o değildi.
+
+   `ntc/ai/flowai.py` — model **tahsisi kendisi veriyor**: hangi isteğe kaç
+   Mbps, hangi bacaktan. Çıktı `validate()` ile üç kısıttan geçiyor (talebi
+   aşma, kapasiteyi aşma, var olmayan cihaz/bacak) ve `pins_for()` ile
+   çözücünün **0. turuna** giriyor. LP artık karar verici değil hakem:
+   modelin kararını ağa oturtuyor, kalanı dolduruyor.
+
+   **Ölçüm — AI tek başına yetmiyor, hibrit kayıpsız:**
+
+   | | AI tek | AI + LP | LP tek |
+   |---|---|---|---|
+   | geçen toplam | ~%22 | **%100** | %100 |
+
+   AI tek başına optimumun beşte birini geçiriyordu (taleplerin çoğunu
+   yanıtsız bırakıyor). Hibrit hiçbir şey kaybetmiyor.
+
+   **Kimlikle sorma iki kat fark yarattı.** İlk sürümde model cihaz adını,
+   yönü ve sınıfı yeniden yazıyordu ve ölçülebilir biçimde bozuyordu:
+   `lan`'ı `down` yazıyor, bacak alanına `indirme` koyuyordu. Satırlara kısa
+   kimlik (`r1`, `r2`) verip kimlikle cevap istemek:
+
+   | | eski (ad yazdırma) | yeni (kimlik) |
+   |---|---|---|
+   | akışın AI payı | %16–24 | **%54–89** |
+   | kayıp | 0.0 | 0.0 |
+
+   Yazdırmadığı şeyi yanlış yazamıyor. **LAN talepleri modele hiç
+   gitmiyor** — hedefleri internet değil, seçecek bacak yok, ve model yönü
+   `down` sanıp satırı bozuyordu.
+
+   **3. tur eklendi: artan kapasite çöpe atılmıyor.** AI'ın sabitlediği
+   talepler artık turuna girmiyordu (kararı o verdi) ama kimsenin
+   istemediği kapasite boşta kalıyordu — ölçüldü: sayaçlı senaryoda 45 Mbps,
+   bozuk bacak senaryosunda 31 Mbps. Artık AI'ın kararı **taban** olarak
+   korunuyor, üstü artıktan besleniyor. Kimseden bir şey alınmıyor.
+
+   Canlı doğrulama (tıkanma senaryosu): AI geçerli, 10 tahsis, **0 ihlal,
+   0 onarım**, bacakları kendi seçti (cikis-1: 6, cikis-2: 4), akışın %38'i
+   AI kararı, LP'ye göre kayıp 0.0 Mbps.
+
+   ⚠️ **Pay `MAX_ROWS` ile sınırlı.** Canlıda 54 talebin 10'u modele gidiyor,
+   gerisi LP'ye — %38'lik payın tavanı bu. Model daha uzun listeyi
+   kaldırabilirse pay yükselir.
+
+   API: `/api/flow/ai` — `share` alanı iddiayı ölçülebilir tutuyor.
+
+4k. **Model tavanı ölçüldü — phi-4-mini'de kalındı** *(2026-08-25)*
+
+   `MAX_ROWS` sınırının donanımdan mı modelden mi geldiği soruldu. Süpürüldü:
+
+   | satır | istem (karakter) | süre | geçerli | cevapladığı |
+   |---|---|---|---|---|
+   | 10 | 1896 | 6 sn | evet | 10 |
+   | 16 | 2200 | 5 sn | evet | 10 |
+   | 24 | 2606 | 3 sn | evet | 5 |
+   | 32 | 3015 | 38 sn | **hayır** | 0 (JSON bozuk) |
+   | 48 | 3828 | 3 sn | evet | 5 |
+
+   **Donanım değil.** VRAM hatası yok, bağlam taşması yok (48 satır ≈ 1300
+   token, sınır 4096), gecikme düz. Model uzun yapılı çıktı üretemiyor.
+
+   **Bir üst basamağın önü VRAM ile kapalı:** phi-4 (14B) CUDA sürümü
+   **8.4 GB**, kart **8188 MiB (8.0 GB)** — kıl payı sığmıyor. CPU sürümü
+   10.2 GB ve 16.9 GB sistem belleğine sığar ama çok yavaş olur; kullanıcı
+   denemeye gerek görmedi. phi-4-mini-reasoning (3.1 GB) **belleğe sığdı**,
+   davranıştan düştü: 9249 karakter İngilizce akıl yürütme, `</think>` hiç
+   kapanmıyor; 12288 token bütçesiyle 15 dakikada bitmedi.
+
+   **Karar: phi-4-mini kalıyor.** Denenmemiş kaldıraç: modele **10'ar 10'ar**
+   birkaç kez sormak (her turda kalan kapasiteyi bildirerek). Payı %38'in
+   üzerine çıkarabilir, daha büyük model gerektirmez.
+
 ### Tasarımı konuşuldu, kodu yazılmadı
 
 4c. **Cache kaydı boşluğu**
@@ -520,12 +629,52 @@ Server 2025 Evaluation (ücretsiz, 180 gün) / Azure VM / Win11 Pro yükseltme.
    **modelin işi değil**: `db.py` 24 saatlik zaman serisini tutuyor ve
    kullanılmıyor; eğilim oradan regresyonla çıkar, AI çıkanı yorumlar.
 
-4e. **Talep ölçülemiyor — doygun hatta ölçülen hız zaten tavan**
+4e. **✅ Talep tahmini — doygun hatta ölçülen hız zaten tavan** *(2026-08-25)*
 
-   Şu an `demands_from_signals()` ölçülen hızı talep sanıyor. Hat doluyken
-   bu yanlış: 200 Mbps isteyen bir cihaz 50 Mbps ölçülür ve çözücü onu
-   "memnun" görür. Konuşulan çözüm: cihaz başına profil (boş saat gözlemi +
-   toplam transfer boyutu). Kodu yazılmadı.
+   `demands_from_signals()` ölçülen hızı talep sayıyordu ve bu sistemi tam da
+   tıkanma anında körleştiriyordu: 300 Mbps gerçek talep / 100 Mbps kapasite
+   durumunda herkes 33 Mbps ölçülüyor, çözücü "33 istedi 33 verdim" deyip
+   geri çekme listesini **boş** bırakıyordu.
+
+   `ntc/traffic/demand.py` — hat **boşken** ölçülen değer gerçek taleptir;
+   o anlar cihaz+yön başına tepe olarak saklanıyor, hat dolduğunda oradan
+   okunuyor.
+
+   **Ölçüm (gerçeği bildiğimiz kurgu, `t_demand.py`):**
+
+   | | eski sistem | tahminci |
+   |---|---|---|
+   | toplam mutlak hata | 200.0 Mbps | **0.0 Mbps** |
+   | gördüğü eksik | 0.0 Mbps (kör) | **200.0 Mbps** |
+
+   **Kritik ayrım: cihaz payına dayanmış mı?** Tıkanık hatta düşük ölçümün
+   iki zıt sebebi var — cihaz kısıtlanıyordur (talebi yüksek) ya da boştadır
+   (talebi ölçülen kadar). Ayırt eden: adil payının %90'ını kullanıyor mu.
+   Bu ayrım olmadan yedeklemesi bitmiş bir sunucu, eski tepesiyle
+   başkalarının payını çalıyordu (ölçümde yakalandı: 5 Mbps çeken cihaza
+   50 Mbps talep uydurdu).
+
+   **İki tasarım hatası ölçümde yakalandı ve düzeltildi:**
+   - *Tepenin değerini yaşıyla küçültmek.* 60 Mbps çektiği gözlenen cihaz
+     6 saat sonra 45 Mbps ister sayılıyordu; 45 hiçbir zaman gözlenmedi.
+     Tepe bir olgudur, olgu yaşlanmaz — *ilgisi* yaşlanır. Değer olduğu gibi
+     duruyor, yaşlanma `confidence` tarafında; pencere dolunca tamamen düşüyor.
+   - *`peak_ts = 0.0` sentinel'i.* Sıfır geçerli bir zaman damgası; tepe
+     sessizce düşüyordu. `has_peak` bayrağıyla ayrıldı.
+
+   **Sinyal yoksa şişirmiyoruz.** Adil pay bilgisi verilmezse tahmin =
+   ölçüm. İlk sürümde tersi vardı ("tıkanık hatta ölçüm zaten baskı
+   altındadır") ve boştaki cihaza hayali talep uyduruyordu. Ayıramadığımızda
+   şişirmek, başkasının payını çalmak demek.
+
+   ⚠️ **Simülasyonda bu katman etkisiz** ve bu beklenen: simülatör hat
+   tavanını uygulamıyor, akışları doğal hızlarında üretiyor. Yani sim'de
+   ölçülen zaten talep. Katmanın değeri kısıtlanmayı elle kurduğumuz
+   `t_demand.py` üzerinde kanıtlandı; gerçek ağda asıl orada işe yarayacak.
+   Canlı koşuda doğrulanan: eşik altında devreye girmiyor (%64 doluluk →
+   şişirme yok), eşik üstünde giriyor (%139 doluluk → 2 satır geri çekme).
+
+   API: `/api/flow/demand` — hangi cihazın boş saatte ne çektiği.
 
 4f. **Trafik sınıflandırma — DPI'sız katmanlı**
 

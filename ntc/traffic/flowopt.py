@@ -78,6 +78,12 @@ HEALTH_PENALTY = 100.0
 # Sayısal gürültüyü sıfıra yuvarlama sınırı (Mbps).
 EPS = 1e-6
 
+# Yol tercihinin amaç fonksiyonunda alabileceği **toplam** pay. Karşılanan
+# talebin katsayısı 1.0; bu bütçe onun çeyreği. Yani en pahalı, en yavaş, en
+# bozuk yoldan bile 1 Mbps geçirmek, o 1 Mbps'i hiç geçirmemekten iyidir.
+# Bütçe olmadan yüksek bir para ağırlığı çözücüye trafiği çöpe attırıyordu.
+PATH_PENALTY_BUDGET = 0.25
+
 # Sınıf başına asgari garanti — **kapasitenin** yüzdesi olarak.
 #
 # Neden gerekiyor: katı öncelikle çözünce en alt sınıf tamamen aç kalıyordu
@@ -260,7 +266,8 @@ class FlowOptimizer:
     # ------------------------------------------------------------- genel akış
 
     def solve(self, demands: list[Demand],
-              policy: FlowPolicy | None = None) -> FlowPlan:
+              policy: FlowPolicy | None = None,
+              pinned: dict[str, float] | None = None) -> FlowPlan:
         # Tur başına politika: AI durumu yeniden okuduğunda çözücüyü
         # yeniden kurmaya gerek kalmasın.
         if policy is not None:
@@ -286,10 +293,42 @@ class FlowOptimizer:
         edge_usage: dict[str, dict[tuple[str, str], float]] = {}
         note_parts: list[str] = []
 
+        # 0. tur — **AI'ın kendi kararları.**
+        #
+        # `pinned`, modelin doğrudan verdiği tahsisler (bkz. `ai/flowai.py`).
+        # Bu turda LP karar vermiyor, yalnız modelin dediği miktarı ağa
+        # oturtuyor: hangi kenarlardan akacağını hesaplıyor, kapasiteyi
+        # düşüyor. Sonraki turlar kalan ağı görüyor.
+        #
+        # Neden ilk tur: modelin kararı kısıt olacaksa önce yerleşmeli.
+        # Sonraya bıraksaydık LP kapasiteyi kendi mantığıyla dağıtır, model
+        # kalanı toplardı — o zaman karar modelin olmazdı.
+        #
+        # Ölçüldü: model tek başına optimumun %22'sini geçiriyor (taleplerin
+        # çoğunu yanıtsız bırakıyor). Yanıtsızları LP dolduran hibritte toplam
+        # optimumla birebir aynı çıkıyor (360.0 / 360.0) ve akışın %22-47'si
+        # modelin kararı oluyor. Yani kayıp yok, karar paylaşımlı.
+        pin_caps: dict[str, float] = {}
+        for d in usable:
+            v = (pinned or {}).get(d.key)
+            if v is not None:
+                pin_caps[d.key] = min(d.mbps, max(0.0, float(v)))
+        if pin_caps:
+            for cls in order:
+                grup = [d for d in by_class[cls] if d.key in pin_caps]
+                if grup and not self._solve_class(grup, pin_caps, granted,
+                                                  edge_usage):
+                    note_parts.append(f"{cls.value}: AI turu çözülemedi")
+            note_parts.append(f"{len(pin_caps)} tahsis AI kararı")
+
         # 1. tur — asgari garantiler. Her sınıf yalnız tabanı kadar talep
         # edebiliyor, o yüzden en alt sınıf da payını öncelik sırası devreye
         # girmeden alıyor.
         floors = self._floors(by_class)
+        # AI'ın karar verdiği taleplere taban vermiyoruz: kararı o verdi,
+        # üstüne taban eklemek onun kısıtını sessizce gevşetmek olurdu.
+        for k in pin_caps:
+            floors.pop(k, None)
         # Taban turu küçükten büyüğe: büyük bir sınıfın tabanı, küçük ama
         # hayati bir sınıfın tabanını yiyemesin.
         floor_order = sorted(
@@ -299,11 +338,35 @@ class FlowOptimizer:
                 note_parts.append(f"{cls.value}: taban turu çözülemedi")
 
         # 2. tur — kalan kapasite, katı öncelik sırasıyla.
-        residual = {d.key: max(0.0, d.mbps - granted.get(d.key, 0.0))
-                    for d in usable}
+        # AI'ın karar verdiği talepler artık turuna girmiyor: modelin
+        # "buna şu kadar" demesi bir karardır, artıktan beslenip sessizce
+        # aşılmamalı.
+        residual = {
+            d.key: (0.0 if d.key in pin_caps
+                    else max(0.0, d.mbps - granted.get(d.key, 0.0)))
+            for d in usable}
         for cls in order:
             if not self._solve_class(by_class[cls], residual, granted, edge_usage):
                 note_parts.append(f"{cls.value}: çözülemedi")
+
+        # 3. tur — **artan kapasiteyi kimse çöpe atmaz.**
+        #
+        # AI'ın sabitlediği talepler 2. tura girmiyor (kararı o verdi). Ama
+        # kimse kullanmadığı için boşta kalan kapasite varsa, o kararı
+        # korumanın bedeli ağın boş çalışması olur. Ölçüldü: sayaçlı bacak
+        # senaryosunda 45 Mbps, bozuk bacak senaryosunda 31 Mbps boşa gitti.
+        #
+        # Bu tur AI'ın kararını **taban** olarak koruyor: verdiği miktar
+        # garanti, üstü artıktan. Kimseden bir şey almıyor, yalnız kimsenin
+        # istemediği kapasiteyi değerlendiriyor.
+        if pin_caps:
+            artik = {d.key: max(0.0, d.mbps - granted.get(d.key, 0.0))
+                     for d in usable if d.key in pin_caps}
+            if any(v > EPS for v in artik.values()):
+                for cls in order:
+                    grup = [d for d in by_class[cls] if d.key in artik]
+                    if grup:
+                        self._solve_class(grup, artik, granted, edge_usage)
 
         allocations = [
             Allocation(demand=d,
@@ -346,8 +409,43 @@ class FlowOptimizer:
     # ------------------------------------------------------- sınıf başına LP
 
     def _egress_capacity(self) -> float:
-        """İnternete çıkan toplam kapasite — taban bütçesinin ölçeği."""
+        """İnternete **çıkan** toplam kapasite — yani yalnız yükleme.
+
+        ⚠️ Adı yanıltıcı olduğu için bir hataya yol açtı; bkz. `_capacity_for`.
+        Geriye dönük uyum için duruyor, taban hesabında artık kullanılmıyor.
+        """
         return sum(e.effective_mbps for e in self._edges if e.dst == INTERNET)
+
+    def _capacity_for(self, direction: str, lan_dst: str = "") -> float:
+        """Bir talebin tabanının ölçekleneceği kapasite — **yönüne göre**.
+
+        ⚠️ İlk sürüm bütün tabanları `_egress_capacity()` ile ölçekliyordu ve
+        o yalnız **yükleme** kapasitesini topluyor: indirme kenarları
+        `internet → wan` yönünde olduğu için `dst == INTERNET` filtresine
+        hiç takılmıyor.
+
+        Sonuç, topolojiye göre değişen sessiz bir hata: simetrik bir ağda
+        (100/100) doğru çalışıyor, asimetrik bir ağda — yani gerçek internet
+        hatlarının tamamında — indirme tabanları kat kat küçük çıkıyordu.
+        Ölçüldü:
+
+            200/20 hat  → indirme tabanları 10.0x küçük
+            300/40 hat  → indirme tabanları  7.5x küçük
+            100/100 hat →                    1.0x  (doğru, o yüzden fark
+                                                    edilmemişti)
+
+        LAN talepleri daha da kötüydü: hedefleri internet bile değilken
+        internet çıkış kapasitesine göre ölçekleniyorlardı.
+        """
+        if direction == "down":
+            return sum(e.effective_mbps for e in self._edges
+                       if e.src == INTERNET)
+        if direction == "up":
+            return sum(e.effective_mbps for e in self._edges
+                       if e.dst == INTERNET)
+        # LAN: hedefe giren kenarlar. Kameranın NVR'a akıttığı trafiğin
+        # tabanı NVR'ın bağlantısıyla ölçülür, internet hattıyla değil.
+        return sum(e.effective_mbps for e in self._edges if e.dst == lan_dst)
 
     def _floors(self, by_class: dict[TrafficClass, list[Demand]]
                 ) -> dict[str, float]:
@@ -356,16 +454,28 @@ class FlowOptimizer:
         Sınıfın bütçesi kapasitenin sabit bir dilimi; o bütçe sınıf içindeki
         taleplere büyüklükleriyle orantılı dağıtılıyor. Hiçbir talep kendi
         istediğinden fazla taban almıyor.
+
+        **Bütçe yön başına ayrı.** İndirme ve yükleme ayrı kaynaklar; tek bir
+        havuz gibi ölçeklemek asimetrik hatlarda tabanları bozuyordu.
         """
-        capacity = self._egress_capacity()
         floors: dict[str, float] = {}
         for cls, group in by_class.items():
-            total = sum(d.mbps for d in group)
-            if total <= EPS:
-                continue
-            budget = min(total, self.policy.floor_of(cls.value) * capacity)
+            # Yön (ve LAN'da hedef) başına ayrı bütçe.
+            yon_gruplari: dict[tuple[str, str], list[Demand]] = {}
             for d in group:
-                floors[d.key] = min(d.mbps, budget * (d.mbps / total))
+                anahtar = (d.direction,
+                           d.dst if d.direction == "lan" else "")
+                yon_gruplari.setdefault(anahtar, []).append(d)
+
+            for (yon, lan_dst), alt in yon_gruplari.items():
+                kapasite = self._capacity_for(yon, lan_dst)
+                total = sum(d.mbps for d in alt)
+                if total <= EPS or kapasite <= 0:
+                    continue
+                budget = min(total,
+                             self.policy.floor_of(cls.value) * kapasite)
+                for d in alt:
+                    floors[d.key] = min(d.mbps, budget * (d.mbps / total))
         return floors
 
     def _solve_class(self, group: list[Demand], caps: dict[str, float],
@@ -443,16 +553,37 @@ class FlowOptimizer:
         else:
             for k in range(n_k):
                 c[fi(k)] = -1.0
-        for k in range(n_k):
-            for e, edge in enumerate(self._edges):
-                # Gecikme ve para maliyetini küçük bir ceza olarak ekliyoruz:
-                # eşit koşulda kısa ve ucuz kenar seçilsin.
-                # Karışım politikadan: hangi durumda gecikmenin mi, paranın
-                # mı, hat sağlığının mı ağır bastığı sabit bir gerçek değil.
-                c[xi(k, e)] += self.policy.path_weight * (
-                    self.policy.latency_weight * edge.latency_ms
-                    + self.policy.cost_weight * edge.cost_per_gb
-                    + self.policy.health_weight * (1.0 - edge.health))
+        # --- yol tercihi cezası ---
+        #
+        # Eşit koşulda kısa, ucuz ve sağlam kenar seçilsin diye küçük bir ceza.
+        # Karışım politikadan geliyor: hangi durumda gecikmenin mi, paranın mı,
+        # hat sağlığının mı ağır bastığı sabit bir gerçek değil.
+        #
+        # ⚠️ **Ceza, talebi karşılamanın önüne GEÇEMEZ.** Karşılanan talebin
+        # katsayısı 1.0; toplam yol cezası onu aşarsa çözücü trafiği bilerek
+        # çöpe atmaya başlar. Ölçüldü: `path_weight=1e-2` + `cost_weight=60` +
+        # `cost_per_gb=5` ile ceza 3.0'a çıktı ve 180 Mbps'lik talebin 80'i
+        # düştü — paralı hattan kaçınmak uğruna iş kurban edildi.
+        #
+        # Bunu yorumla değil **yapıyla** engelliyoruz: ham cezaları topolojiye
+        # göre ölçekleyip en kötü yol için toplam cezayı bütçenin altında
+        # tutuyoruz. Politika artık bu bütçenin *içinde* tercih belirtiyor;
+        # bütçeyi aşamıyor.
+        ham = [
+            (self.policy.latency_weight * edge.latency_ms
+             + self.policy.cost_weight * edge.cost_per_gb
+             + self.policy.health_weight * (1.0 - edge.health))
+            for edge in self._edges
+        ]
+        tavan = max(ham, default=0.0)
+        if tavan > 0:
+            # Bir akış birimi en fazla (düğüm sayısı - 1) kenardan geçebilir.
+            hop = max(1, len(self._nodes) - 1)
+            guvenli = PATH_PENALTY_BUDGET / (tavan * hop)
+            olcek = min(self.policy.path_weight, guvenli)
+            for k in range(n_k):
+                for e in range(len(self._edges)):
+                    c[xi(k, e)] += olcek * ham[e]
 
         # --- kapasite kısıtları: Σ_k x[k,e] ≤ kalan kapasite ---
         rows, cols, vals, b_ub = [], [], [], []
@@ -545,7 +676,13 @@ LAN_FALLBACK = "srv-file"
 
 def demands_from_signals(signals: dict[str, Any], devices: dict[str, Any],
                          topology: Topology,
-                         lan_targets: dict[str, str] | None = None
+                         lan_targets: dict[str, str] | None = None,
+                         *,
+                         estimator: Any | None = None,
+                         link_stats: Any | None = None,
+                         congestion_threshold: float = 0.80,
+                         active_caps: dict[tuple[str, str], float] | None = None,
+                         ts: float | None = None,
                          ) -> list[Demand]:
     """Ölçülen cihaz sinyallerini talebe çevirir — **üç yönü de**.
 
@@ -566,14 +703,51 @@ def demands_from_signals(signals: dict[str, Any], devices: dict[str, Any],
     `class_mix` cihazın trafiğinin sınıflara dağılımını veriyor; her yönün
     hacmi bu oranlarla bölünüyor.
 
-    ⚠️ **Sınırı:** `class_mix` yön ayrımı yapmıyor — indirme ve yükleme aynı
-    karışımla bölünüyor. Gerçekte yükleme profili farklı olabilir (yedekleme
-    yüklemede baskındır). Yön başına sınıf dağılımı `metrics.py` tarafında
-    ayrılmadan bu düzelmez.
+    **Talep tahmini.** `estimator` verilirse ölçülen hız doğrudan talep
+    sayılmıyor: doygun hatta ölçüm zaten tavandır ve olduğu gibi kullanmak
+    sistemi tam da tıkanma anında körleştiriyordu (ölçüldü: 300 Mbps gerçek
+    talep, 100 Mbps kapasite → geri çekme listesi boş çıkıyordu). Ayrıntı
+    `demand.py` başlığında. Tahminci verilmezse davranış eskisiyle aynı.
     """
     lan_targets = lan_targets or {}
     out: list[Demand] = []
     have_internet = topology.has_node(INTERNET)
+
+    # --- talep tahmini ---
+    #
+    # Ölçülen hız doygun hatta zaten tavandır; olduğu gibi "talep" saymak
+    # sistemi tam da tıkanma anında körleştiriyordu (bkz. `demand.py`).
+    # Tahminci verilmezse eski davranış aynen sürüyor — bu katman
+    # eklenebilir, zorunlu değil.
+    ts = now() if ts is None else ts
+    kapasite_down, kapasite_up = topology.wan_capacity()
+    doluluk_down = getattr(link_stats, "down_utilization", 0.0) or 0.0
+    doluluk_up = getattr(link_stats, "up_utilization", 0.0) or 0.0
+
+    # Adil pay: o yönde trafiği olan cihaz sayısına bölünmüş kapasite.
+    # "Cihaz payına dayanmış mı" ayrımının ölçüsü bu; olmadan tahminci
+    # boştaki cihaza hayali talep uyduruyordu.
+    def aktif_sayisi(alan: str) -> int:
+        return max(1, sum(1 for s in signals.values()
+                          if (getattr(s, alan, 0.0) or 0.0) > 0))
+
+    pay_down = kapasite_down / aktif_sayisi("down_bps") if kapasite_down else None
+    pay_up = kapasite_up / aktif_sayisi("up_bps") if kapasite_up else None
+    tikanik = {"down": doluluk_down >= congestion_threshold,
+               "up": doluluk_up >= congestion_threshold}
+    paylar = {"down": pay_down, "up": pay_up}
+    caps = active_caps or {}
+
+    def kestir(host: str, direction: str, olculen: float) -> float:
+        """Ölçülen hızı tahmini talebe çevirir; tahminci yoksa dokunmaz."""
+        if estimator is None:
+            return olculen
+        yer = tikanik.get(direction, False)
+        estimator.observe(host, direction, olculen, congested=yer, ts=ts)
+        e = estimator.estimate(host, direction, olculen, congested=yer, ts=ts,
+                               fair_share_mbps=paylar.get(direction),
+                               capped_at_mbps=caps.get((host, direction)))
+        return e.mbps
 
     def split(host: str, mbps: float, mix: dict[str, float],
               *, dst: str, src: str | None, direction: str) -> None:
@@ -609,12 +783,14 @@ def demands_from_signals(signals: dict[str, Any], devices: dict[str, Any],
 
         if have_internet:
             # İndirme: kaynak internet, hedef cihazın bağlanma noktası.
-            split(host, (getattr(sig, "down_bps", 0.0) or 0.0) / 1e6,
+            split(host, kestir(host, "down",
+                               (getattr(sig, "down_bps", 0.0) or 0.0) / 1e6),
                   mix_for("class_mix_down"),
                   dst=topology.attach_point(host), src=INTERNET,
                   direction="down")
             # Yükleme: cihazdan çıkıyor, kaynak varsayılan (bağlanma noktası).
-            split(host, (getattr(sig, "up_bps", 0.0) or 0.0) / 1e6,
+            split(host, kestir(host, "up",
+                               (getattr(sig, "up_bps", 0.0) or 0.0) / 1e6),
                   mix_for("class_mix_up"),
                   dst=INTERNET, src=None, direction="up")
 
