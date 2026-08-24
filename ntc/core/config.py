@@ -94,6 +94,13 @@ class AIConfig:
     temperature: float = 0.2
     timeout_seconds: float = 120.0
     analysis_interval_seconds: float = 30.0
+    # **Modelin sisteme dokunduğu tek yol.** Duruma göre çözücünün hedefini
+    # kuruyor: sınıf sırası, taban profili, ağırlık seviyeleri. Sayı üretmiyor;
+    # sayıyı LP hesaplıyor. Kapatılırsa hedef sabit varsayılanda kalır ve
+    # sistem çalışmaya devam eder.
+    policy_enabled: bool = True
+    # Analizden seyrek: hedefi her 30 saniyede savurmak ağı sallar.
+    policy_interval_seconds: float = 120.0
     max_snapshot_flows: int = 25
     # İstem uzunluğuna sert tavan. Model bağlamı 4096 token; `lm_head` çıktısı
     # istemle birlikte büyüyor ve yük altında ONNX Runtime 1.2 GB ayırmaya

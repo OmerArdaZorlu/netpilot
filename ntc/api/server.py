@@ -129,6 +129,29 @@ def create_app(cfg: Config | None = None) -> FastAPI:
     async def flow_topology():
         return controller.topology.to_dict()
 
+    @app.get("/api/flow/policy")
+    async def flow_policy():
+        """Çözücünün şu anki **hedefi** — kim koydu, neden, neyi değiştirdi.
+
+        `note` alanı modelin son turda ne yaptığını söylüyor:
+        kabul / reddedildi / korundu. Reddedilen çıktının gerekçesi
+        `issues` içinde duruyor — modelin saçmaladığını gizlemiyoruz.
+        """
+        return {
+            **controller.flow_policy.to_dict(),
+            "describe": controller.flow_policy.describe(),
+            "note": controller.policy_note,
+            "issues": controller.policy_issues,
+            "enabled": controller.cfg.ai.policy_enabled,
+        }
+
+    @app.post("/api/flow/policy/refresh")
+    async def flow_policy_refresh():
+        """Beklemeden hedefi yeniden kur."""
+        pol = await controller.refresh_policy()
+        return {**pol.to_dict(), "note": controller.policy_note,
+                "issues": controller.policy_issues}
+
     @app.get("/api/enforce/state")
     async def enforce_state():
         """İnfaz katmanının durumu: hangi sürücü, hangi mod, hangi kurallar."""

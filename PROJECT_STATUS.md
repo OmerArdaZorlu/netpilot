@@ -32,7 +32,8 @@ Simulator → Metrics → (Optimizer ‖ AI Analyst) → Controller → API + Pa
 | AI analisti | `ntc/ai/analyst.py` | ✅ snapshot, analiz, soru-cevap, normalizasyon |
 | Kalıcılık | `ntc/storage/db.py` | ✅ SQLite, 5 tablo, 24 saat saklama |
 | Akış topolojisi | `ntc/traffic/topology.py` | ✅ yönlü kapasiteli grafik + tohumlu rastgele ağ üreteci; `link:` buradan türetiliyor |
-| Akış çözücüsü | `ntc/traffic/flowopt.py` | ✅ çok mallı akış LP'si, öncelik + asgari garanti |
+| Akış çözücüsü | `ntc/traffic/flowopt.py` | ✅ çok mallı akış LP'si; hedefi artık sabit değil, `flowpolicy` üzerinden geliyor |
+| Akış politikası | `ntc/traffic/flowpolicy.py` | ✅ çözücünün hedefi + doğrulama kapısı; AI'ın sisteme dokunduğu tek yer |
 | İnfaz — politika | `ntc/enforce/policy.py` | ✅ cihazdan bağımsız kural nesneleri + onay köprüsü |
 | İnfaz — sürücüler | `ntc/enforce/drivers.py` | ✅ anlat / linux (`tc`) / windows (QoS); **komut metni** doğrulandı, cihaz davranışı doğrulanmadı |
 | İnfaz — uzlaştırıcı | `ntc/enforce/engine.py` | ✅ fark uygulama, gölge modu, kapanışta geri alma |
@@ -447,6 +448,56 @@ Server 2025 Evaluation (ücretsiz, 180 gün) / Azure VM / Win11 Pro yükseltme.
    Doğrulama: `t_random_topo.py` 12 rastgele mimaride tüm zinciri
    (çözücü → aksiyon → politika → infaz) koşturuyor; hiçbir katman düğüm adı
    varsaymıyor, hiçbiri düşmedi, hiçbir kural atlanmadı.
+
+4h. **✅ AI politika katmanı — modelin sisteme dokunduğu tek yol** *(2026-08-24)*
+
+   **Kullanıcının baştan beri istediği buydu ve ben yanlış kurmuştum.** LP'yi
+   "beyin", AI'ı "anlatıcı" sanmıştım. Doğrusu: LP verilen hedefe göre optimal
+   çözüyor, ama *hedef* bir olgu değil karar — ve o karar `flowopt.py` içinde
+   sabit tablolardaydı (realtime hep bulk'u yener, tabanlar hep aynı, gecikme
+   hep paradan baskın). Sabit tablo sabit bir gün ve sabit bir ağ varsayıyordu.
+
+   ```
+   durum (ölçüm + saat + hat) ──► AI ──► FlowPolicy ──► LP ──► akış
+                                         (hedef)              (sayılar)
+   ```
+
+   Dört sabit dışarı çıktı: sınıf sırası, taban payları, yol tercihi ağırlığı,
+   gecikme/para/sağlık karışımı.
+
+   **Ölçüm — modelden sayı istemek çalışmıyor.** 4 durum, gerçek phi-4-mini:
+
+   | | sayı isteyen istem | kategorik istem |
+   |---|---|---|
+   | doğru hedef | **1/4** | **2/4** |
+   | ağırlıklara dokundu | 0/4 (hepsinde varsayılanı geri yazdı) | 2/4 |
+   | taban kalitesi | %14.6'da eşitledi, 3 sınıfı sıfırladı | profil adı, makul |
+
+   "Sayaçlı hat dikkate alınmalı" diye yazdığı halde para ağırlığını 10'da
+   bıraktı — niyeti anlıyor, sayıya çeviremiyor. Aynı kusur %17.5'i "critical"
+   demesinde ve bir payı %122 raporlamasında da vardı. Çözüm: sayıyı ondan
+   hiç istememek. Model `"yuksek"` diyor, sayıyı `WEIGHT_LEVELS` koyuyor;
+   taban için profil adı seçiyor, sayıları `FLOOR_PROFILES` tutuyor.
+
+   **Doğrulama kapısı çalışıyor.** Ölçümde model `"gedemek"` diye bir profil
+   uydurdu → reddedildi, mevcut hedef korundu, ağa hiçbir şey gitmedi.
+   Reddedilen çıktı gizlenmiyor: `policy_issues` ve `/api/flow/policy`
+   üzerinden görünür — yoksa "AI çalışıyor" yanılsaması kalırdı.
+
+   **Reddedilince varsayılana DÖNMÜYORUZ, mevcudu koruyoruz.** Varsayılan daha
+   güvenli görünür ama değil: hedefi tam da modelin güvenilmediği anda
+   sıfırlamak ağı sallar.
+
+   Canlı doğrulama: AI "akşam, ofis boş, yeniden gönderim yüksek" okudu,
+   `bulk > streaming > interactive > realtime` sırası + `yedekleme-penceresi`
+   profili + gecikme/sağlık yüksek kurdu; çözücü bulk'a +137.6 Mbps verdi.
+   *(Uyarı: iki çözüm arasında talep de büyüdüğü için toplamdaki değişim
+   yalnız politikaya atfedilemez; sınıf dağılımındaki kayma atfedilebilir.)*
+
+   ⚠️ **Kalan kusur:** sayaçlı hat durumunda model hâlâ parayı değil gecikmeyi
+   yükseltiyor (2/4'ün kaçan yarısı). İstemde "SAYAÇLI" büyük harfle yazılı
+   ama görmüyor. Denenecek: daha büyük model, ya da sayaçlı hat varlığını
+   ayrı bir alan olarak sormak.
 
 ### Tasarımı konuşuldu, kodu yazılmadı
 

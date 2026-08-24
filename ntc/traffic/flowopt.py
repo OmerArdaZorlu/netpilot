@@ -53,10 +53,17 @@ from ..core.models import (
     new_id,
     now,
 )
+from .flowpolicy import DEFAULT_POLICY, FlowPolicy
 from .topology import INTERNET, Edge, Topology
 
 log = logging.getLogger(__name__)
 
+# ⚠️ Aşağıdaki sabitler artık **yalnız varsayılan değer**. Gerçek değerler
+# `FlowPolicy` üzerinden geliyor ve duruma göre değişiyor — sabit bir tablo
+# sabit bir gün varsayıyordu (gece yedekleme penceresinde realtime'ın bulk'u
+# yenmesi yanlış, sayaçlı hat devredeyken gecikmenin paradan baskın olması
+# yanlış). Politikayı `flowpolicy.py` tutuyor, onu duruma göre AI kuruyor.
+#
 # Eşit koşulda ucuz ve hızlı kenarı seçtiren ağırlık. Amaç fonksiyonunda
 # karşılanan talebin yanında çok küçük kalmalı — yol tercihi, talebi karşılamanın
 # önüne geçmemeli.
@@ -239,8 +246,12 @@ class FlowPlan:
 class FlowOptimizer:
     """Çok mallı akış problemini sınıf önceliğine göre çözer."""
 
-    def __init__(self, topology: Topology) -> None:
+    def __init__(self, topology: Topology,
+                 policy: FlowPolicy | None = None) -> None:
         self.topo = topology
+        # Hedef dışarıdan geliyor. Verilmezse varsayılan — sistem AI olmadan
+        # da çalışmaya devam ediyor, yalnız hedefi sabit kalıyor.
+        self.policy = policy or DEFAULT_POLICY
         self._edges: list[Edge] = list(topology.edges)
         self._edge_index = {e.key: i for i, e in enumerate(self._edges)}
         self._nodes: list[str] = topology.nodes
@@ -248,7 +259,12 @@ class FlowOptimizer:
 
     # ------------------------------------------------------------- genel akış
 
-    def solve(self, demands: list[Demand]) -> FlowPlan:
+    def solve(self, demands: list[Demand],
+              policy: FlowPolicy | None = None) -> FlowPlan:
+        # Tur başına politika: AI durumu yeniden okuduğunda çözücüyü
+        # yeniden kurmaya gerek kalmasın.
+        if policy is not None:
+            self.policy = policy
         usable, skipped = self._filter(demands)
         if not usable:
             return FlowPlan(allocations=[Allocation(d, 0.0) for d in skipped],
@@ -261,7 +277,10 @@ class FlowOptimizer:
         by_class: dict[TrafficClass, list[Demand]] = {}
         for d in usable:
             by_class.setdefault(d.traffic_class, []).append(d)
-        order = sorted(by_class, key=lambda c: c.priority)
+        # Sıra enum'daki sabit önceliğe göre değil, **politikaya** göre.
+        # Sabit sıra, "realtime her zaman kazanır" demekti; gece yedekleme
+        # penceresinde bu yanlış bir hedef.
+        order = sorted(by_class, key=lambda c: self.policy.priority_of(c.value))
 
         granted: dict[str, float] = {d.key: 0.0 for d in usable}
         edge_usage: dict[str, dict[tuple[str, str], float]] = {}
@@ -344,7 +363,7 @@ class FlowOptimizer:
             total = sum(d.mbps for d in group)
             if total <= EPS:
                 continue
-            budget = min(total, CLASS_FLOOR_SHARE.get(cls, 0.0) * capacity)
+            budget = min(total, self.policy.floor_of(cls.value) * capacity)
             for d in group:
                 floors[d.key] = min(d.mbps, budget * (d.mbps / total))
         return floors
@@ -428,10 +447,12 @@ class FlowOptimizer:
             for e, edge in enumerate(self._edges):
                 # Gecikme ve para maliyetini küçük bir ceza olarak ekliyoruz:
                 # eşit koşulda kısa ve ucuz kenar seçilsin.
-                c[xi(k, e)] += COST_WEIGHT * (
-                    edge.latency_ms
-                    + 10.0 * edge.cost_per_gb
-                    + HEALTH_PENALTY * (1.0 - edge.health))
+                # Karışım politikadan: hangi durumda gecikmenin mi, paranın
+                # mı, hat sağlığının mı ağır bastığı sabit bir gerçek değil.
+                c[xi(k, e)] += self.policy.path_weight * (
+                    self.policy.latency_weight * edge.latency_ms
+                    + self.policy.cost_weight * edge.cost_per_gb
+                    + self.policy.health_weight * (1.0 - edge.health))
 
         # --- kapasite kısıtları: Σ_k x[k,e] ≤ kalan kapasite ---
         rows, cols, vals, b_ub = [], [], [], []

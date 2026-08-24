@@ -21,8 +21,16 @@ from ..core.models import (
 )
 from ..traffic.metrics import MetricsEngine
 from ..traffic.optimizer import TrafficOptimizer
-from .prompts import ANALYST_SYSTEM, ANALYST_USER, QA_SYSTEM, QA_USER
-from .provider import LLMProvider, LLMUnavailable
+from ..traffic.flowpolicy import DEFAULT_POLICY, FlowPolicy
+from .prompts import (
+    ANALYST_SYSTEM,
+    ANALYST_USER,
+    POLICY_SYSTEM,
+    POLICY_USER,
+    QA_SYSTEM,
+    QA_USER,
+)
+from .provider import LLMProvider, LLMUnavailable, extract_json
 
 log = logging.getLogger(__name__)
 
@@ -239,6 +247,118 @@ class AIAnalyst:
         report.actions = self._to_actions(report.recommendations, devices)
         self.last_report = report
         return report
+
+    # --------------------------------------------------------------- politika
+
+    async def decide_policy(
+        self, metrics: MetricsEngine, topology: Any,
+        alerts: list[Alert] | None = None,
+        current: FlowPolicy | None = None,
+        clock_hour: int | None = None,
+    ) -> tuple[FlowPolicy, list[str], str]:
+        """Duruma uygun **hedefi** modele kurdurur.
+
+        Döner: (politika, sorunlar, sonuç). Sonuç: kabul | reddedildi | korundu.
+
+        **Modelin sisteme dokunduğu tek yer burası** ve kapı bilerek dar:
+        model sayı üretmiyor, sıralama ve ağırlık üretiyor — sayıyı LP
+        hesaplıyor. Ölçüldü ki bu model %17.5 doluluğu "critical" diyor ve bir
+        sınıf payını %122 olarak raporluyor; aritmetiği yok. Ama "gece
+        yedekleme penceresi, bulk'u yukarı al" diyebiliyor. İstediğimiz o.
+
+        Model çökerse, geçersiz üretirse veya sağlayıcı yoksa **mevcut politika
+        korunuyor.** Varsayılana dönmek daha "güvenli" görünür ama değil:
+        hedefi tam da modelin güvenilmediği anda sıfırlamak ağı sallar.
+        """
+        mevcut = current or DEFAULT_POLICY
+        if self.provider is None:
+            return mevcut, ["sağlayıcı yok"], "korundu"
+
+        try:
+            durum = self._situation(metrics, topology, alerts, clock_hour)
+        except Exception as exc:
+            log.exception("Durum özeti kurulamadı")
+            return mevcut, [f"durum özeti kurulamadı: {exc}"], "korundu"
+
+        user = POLICY_USER.format(
+            saat=durum["saat"], cikislar=durum["cikislar"],
+            durum=durum["durum"], sinif_payi=durum["sinif_payi"],
+            uyarilar=durum["uyarilar"],
+            mevcut=json.dumps(mevcut.to_dict(), ensure_ascii=False,
+                              separators=(",", ":")),
+        )
+
+        try:
+            # `complete_json` json_mode'u açıyor ve model konuşkanlık yaparsa
+            # gövdedeki nesneyi kurtarıyor — küçük modellerde sık gerekiyor.
+            data = await self.provider.complete_json(POLICY_SYSTEM, user)
+        except Exception as exc:
+            log.warning("Politika isteği başarısız: %s", exc)
+            return mevcut, [f"model yanıt vermedi: {exc}"], "korundu"
+
+        if not data:
+            return mevcut, ["model geçerli JSON döndürmedi"], "korundu"
+
+        politika, sorunlar = FlowPolicy.validate(data)
+        if politika is None:
+            log.warning("AI politikası reddedildi: %s", sorunlar)
+            return mevcut, sorunlar, "reddedildi"
+
+        politika.source = "ai"
+        return politika, sorunlar, "kabul"
+
+    def _situation(self, metrics: MetricsEngine, topology: Any,
+                   alerts: list[Alert] | None,
+                   clock_hour: int | None) -> dict[str, str]:
+        """Modele gidecek durum özeti — kısa ve **aritmetiksiz**.
+
+        Yüzdeler, Mbps ve "YÜKSEK / normal" yargıları burada hazır metne
+        çevriliyor; modelden oran hesaplaması istenmiyor. Tek yaptığı okumak
+        ve durum yargısı vermek — becerebildiği iş bu.
+        """
+        st = metrics.link_stats()
+        saat = clock_hour if clock_hour is not None else time.localtime().tm_hour
+        if 8 <= saat < 19:
+            gun = "mesai saati"
+        elif 19 <= saat < 23:
+            gun = "akşam"
+        else:
+            gun = "gece, ofis büyük ihtimalle boş"
+
+        satirlar = []
+        for e in getattr(topology, "edges", []):
+            if getattr(e, "kind", "") != "wan" or e.src != "internet":
+                continue
+            etiket = [f"{e.dst}: {e.capacity_mbps:.0f} Mbps indirme",
+                      f"{e.latency_ms:.0f} ms gecikme"]
+            etiket.append(f"SAYAÇLI ({e.cost_per_gb:.1f} birim/GB)"
+                          if e.cost_per_gb > 0 else "ücretsiz")
+            if e.health < 0.99:
+                etiket.append(f"BOZUK (sağlık %{e.health * 100:.0f})")
+            satirlar.append("- " + ", ".join(etiket))
+
+        durum = [
+            f"- indirme hattı doluluğu: %{st.down_utilization * 100:.0f}",
+            f"- yükleme hattı doluluğu: %{st.up_utilization * 100:.0f}",
+            f"- ortalama gecikme: {st.avg_rtt_ms:.0f} ms "
+            f"({'YÜKSEK' if st.avg_rtt_ms > 120 else 'normal'})",
+            f"- yeniden gönderim: %{st.retransmit_rate * 100:.1f} "
+            f"({'YÜKSEK' if st.retransmit_rate > 0.02 else 'normal'})",
+        ]
+
+        toplam = sum(st.per_class_bps.values()) or 1.0
+        paylar = [f"- {k}: %{v / toplam * 100:.0f}"
+                  for k, v in sorted(st.per_class_bps.items(),
+                                     key=lambda kv: -kv[1]) if v > 0]
+        uyari = [f"- {a.title}" for a in (alerts or [])[-5:]] or ["- yok"]
+
+        return {
+            "saat": f"{saat:02d}:00 ({gun})",
+            "cikislar": "\n".join(satirlar) or "- bilinmiyor",
+            "durum": "\n".join(durum),
+            "sinif_payi": "\n".join(paylar) or "- trafik yok",
+            "uyarilar": "\n".join(uyari),
+        }
 
     async def ask(self, question: str, metrics: MetricsEngine,
                   devices: dict[str, Device],

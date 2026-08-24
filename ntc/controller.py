@@ -43,6 +43,7 @@ from .enforce import (
     build_driver,
     policies_from_plan,
 )
+from .traffic.flowpolicy import DEFAULT_POLICY, FlowPolicy
 from .traffic.optimizer import TrafficOptimizer
 from .traffic.topology import Topology
 from .traffic.simulator import TrafficSimulator
@@ -80,7 +81,13 @@ class Controller:
         # Bunlar `cfg.link` referansını topoloji türetmesinden **sonra** alıyor.
         self.metrics = MetricsEngine(cfg.link, cfg.collector.window_seconds)
         self.optimizer = TrafficOptimizer(cfg.optimizer, cfg.link)
-        self.flow_optimizer = FlowOptimizer(self.topology)
+        # Çözücünün **hedefi**. Sabit bir tablo değil: AI duruma bakıp
+        # kuruyor (gece yedekleme penceresi, sayaçlı hat devrede, bozuk
+        # bacak...). Model yoksa veya saçmalarsa varsayılanda kalıyor.
+        self.flow_policy: FlowPolicy = DEFAULT_POLICY
+        self.policy_note: str = "başlangıç"
+        self.policy_issues: list[str] = []
+        self.flow_optimizer = FlowOptimizer(self.topology, self.flow_policy)
         self.flow_plan: FlowPlan | None = None
         # Akışları planın oranlarına göre çıkışlara dağıtır.
         self.path_assigner = PathAssigner()
@@ -159,6 +166,7 @@ class Controller:
             asyncio.create_task(self._optimize_loop(), name="optimize"),
             asyncio.create_task(self._ai_loop(), name="ai"),
             asyncio.create_task(self._flow_loop(), name="flow"),
+            asyncio.create_task(self._policy_loop(), name="policy"),
             asyncio.create_task(self._prune_loop(), name="prune"),
         ]
         log.info("Controller başladı (mod=%s, ai=%s/%s)",
@@ -253,6 +261,49 @@ class Controller:
                     log.exception("Akış optimizasyon döngüsünde hata")
             await asyncio.sleep(interval)
 
+    async def _policy_loop(self) -> None:
+        """Çözücünün hedefini duruma göre yeniden kurar.
+
+        Akış döngüsünden **seyrek** koşuyor ve bu bilinçli: hedefi her 15
+        saniyede değiştirmek, çözümü sürekli oynatıp ağı sallar. Hedef yavaş
+        değişen bir şey — gün içindeki faz, hat durumu, olay hali.
+        """
+        interval = self.cfg.ai.policy_interval_seconds
+        await asyncio.sleep(min(interval, self.cfg.collector.window_seconds))
+        while self._running:
+            if self.cfg.ai.policy_enabled:
+                try:
+                    await self.refresh_policy()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    log.exception("Politika döngüsünde hata")
+            await asyncio.sleep(interval)
+
+    async def refresh_policy(self) -> FlowPolicy:
+        """Tek seferlik hedef güncellemesi. API ve CLI buradan çağırıyor."""
+        if self.analyst is None:
+            return self.flow_policy
+        onceki = self.flow_policy
+        politika, sorunlar, sonuc = await self.analyst.decide_policy(
+            self.metrics, self.topology, list(self.alerts),
+            current=onceki)
+        self.policy_note = sonuc
+        self.policy_issues = sorunlar
+        if sonuc == "kabul":
+            fark = politika.diff(onceki)
+            self.flow_policy = politika
+            self.flow_optimizer.policy = politika
+            if fark:
+                log.info("Hedef değişti (%s): %s", politika.situation or "-",
+                         "; ".join(fark))
+        elif sorunlar:
+            # Reddedilen politikayı sessizce yutmuyoruz: modelin ne saçmaladığı
+            # panelde görünmeli, yoksa "AI çalışıyor" yanılsaması kalır.
+            log.warning("Hedef güncellenmedi (%s): %s", sonuc,
+                        "; ".join(sorunlar))
+        return self.flow_policy
+
     async def run_flow_optimization(self) -> FlowPlan | None:
         """Tek seferlik akış çözümü. CLI ve API buradan çağırıyor."""
         signals = self.metrics.device_signals()
@@ -264,7 +315,8 @@ class Controller:
             return None
 
         # LP saf CPU işi; olay döngüsünü kilitlememesi için ayrı iş parçacığında.
-        plan = await asyncio.to_thread(self.flow_optimizer.solve, demands)
+        plan = await asyncio.to_thread(self.flow_optimizer.solve, demands,
+                                       self.flow_policy)
         self.flow_plan = plan
         self.path_assigner.update(plan)
         await self.storage.save_flow_plan(new_id("flw"), now(), plan)

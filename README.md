@@ -16,6 +16,9 @@ tespit eder, gerekçeli QoS politikaları üretir; AI analisti bu tabloyu okuyup
   yazılmış tek bir topolojiye bağlı değil
 - **İnfaz katmanı** — planı cihazdan bağımsız politikalara, onları `tc` /
   `New-NetQosPolicy` komutlarına çevirir; farkı uzlaştırır
+- **AI politika katmanı** — duruma göre çözücünün hedefini kurar
+  (sınıf sırası, taban profili, ağırlık seviyeleri); ürettiği her alan
+  doğrulanır, geçersizse reddedilir
 - Yerel LLM analisti (Foundry Local / Ollama / kural tabanlı yedek)
 - Canlı panel, simülasyon ortamı, 6 tetiklenebilir senaryo
 
@@ -185,6 +188,33 @@ göre yönlendirir). Sürücü bunlara yaklaşık bir komut üretmek yerine gere
 yazılı bir "atlandı" kaydı bırakıyor; kural aktif sayılmıyor ve bir sonraki
 turda yeniden deneniyor.
 
+**AI çözücünün hedefini kurar — sayısını değil.** Çözücü verilen hedefe göre
+matematiksel olarak en iyi cevabı bulur, ama *hedefin kendisi* bir olgu değil
+karar: "realtime her zaman bulk'u yener" gece 03:00'te yanlış, "gecikme
+paradan baskın" sayaçlı hat devredeyken yanlış. Bu kararlar `flowopt.py`
+içinde sabit tablolardı; artık `flowpolicy.py` içinde ve duruma göre AI
+kuruyor:
+
+```
+durum (ölçüm + saat + hat durumu) ──► AI ──► FlowPolicy ──► LP ──► akış
+                                             (hedef)              (sayılar)
+```
+
+**Modelden sayı istenmiyor, kelime isteniyor.** Ölçüldü (4 durum, gerçek
+phi-4-mini): sayı istendiğinde ağırlıklara 4/4 hiç dokunmadı, tabanları
+%14.6'da eşitledi, üç sınıfı sıfırladı. Kategorik seçeneğe (`"dusuk" |
+"normal" | "yuksek"`, profil adı) çevrilince aynı dört durumda 1/4 → 2/4'e
+çıktı ve ürettiği sayılar makul hale geldi. Model niyeti anlıyor, sayıya
+çeviremiyor — bu yüzden sayıyı kod koyuyor.
+
+**Modelin ürettiği her alan doğrulanıyor.** Sıralama beş sınıfın permütasyonu
+olmak zorunda, profil adı listede olmalı, ağırlık seviyesi tanınmalı, taban
+toplamı %60'ı aşamaz. Geçersiz çıktı sessizce kabul edilmiyor: gerekçesiyle
+reddedilip **mevcut hedef korunuyor.** (Ölçümde model `"gedemek"` diye bir
+profil uydurdu; kapı tuttu, ağa hiçbir şey gitmedi.) Varsayılana dönmek yerine
+mevcudu korumak bilinçli — hedefi tam da modelin güvenilmediği anda
+sıfırlamak ağı sallardı.
+
 **AI önerileri otomatik uygulanmaz.** LLM'den gelen aksiyonlar `source="ai"`,
 `applied=False` olarak üretilir ve operatörün onayını bekler. Halüsinasyon ağa
 dokunamaz.
@@ -243,6 +273,8 @@ curl -X POST http://127.0.0.1:8080/api/sim/scenario \
 | `GET /api/flow/plan` | Son akış çözümü: tahsisler, geri çekmeler, darboğazlar |
 | `POST /api/flow/solve` | Beklemeden yeniden çöz |
 | `GET /api/flow/topology` | Topoloji grafiği (düğümler + kenarlar) |
+| `GET /api/flow/policy` | Çözücünün şu anki hedefi: kim koydu, neden, son turda ne oldu |
+| `POST /api/flow/policy/refresh` | Hedefi beklemeden yeniden kur |
 | `GET /api/enforce/state` | İnfaz durumu: sürücü, mod, kurulu kurallar, son uzlaştırma |
 | `GET /api/enforce/policies` | Son plandan çıkan **istenen** politika kümesi |
 | `GET /api/enforce/preview` | Kuru çalıştırma: hepsi onaylı olsa hangi komutlar çıkardı |
