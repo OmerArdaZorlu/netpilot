@@ -34,13 +34,17 @@ python -m ntc doctor        # LLM  foundry / phi-4-mini
 
 Foundry Local modeli ONNX Runtime üzerinde koşturur ve donanıma uygun varyantı
 (CPU / GPU / NPU) kendi seçer. Servis ucu dinamik porttadır; sağlayıcı bunu
-`foundry service status` çıktısından keşfeder. Sabitlemek istersen
-`config.yaml` içindeki `ai.base_url` alanına yaz.
+`foundry server status -o json` çıktısındaki `webUrls` alanından keşfeder.
+Sabitlemek istersen `config.yaml` içindeki `ai.base_url` alanına yaz.
 
 > **Not:** Foundry Local bir MSIX paketidir. Makinede sideloading kapalıysa
 > (`HKLM\SOFTWARE\Policies\Microsoft\Windows\Appx\AllowAllTrustedApps = 0`)
-> kurulum `0x80073cff` ile başarısız olur. Yönetici olarak bu değeri `1`
-> yapmak gerekir.
+> kurulum `0x80073cff` ile başarısız olur. Değeri yönetici olarak `1` yapmak
+> yeterlidir — **eğer** onu yazan bir yönetim politikası yoksa. Cihaz Intune /
+> MDM kaydındaysa politika her senkronda geri yazılır; sahibini
+> `HKLM\SOFTWARE\Microsoft\PolicyManager\current\device\ApplicationManagement`
+> altındaki `AllowAllTrustedApps_WinningProvider` değerinden görebilirsin.
+> O durumda ya kayıt kaldırılmalı ya da Ollama yedeğiyle devam edilmeli.
 
 **Ollama (geliştirme yedeği):**
 

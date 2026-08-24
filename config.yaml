@@ -23,7 +23,12 @@ optimizer:
 
 ai:
   provider: auto          # auto | foundry | ollama | mock
-  model: phi-4-mini       # foundry model download phi-4-mini
+  # Takma ad `phi-4-mini` varsayilan olarak OpenVINO varyantina cozuluyor;
+  # o Intel iGPU'da kosuyor ve olculen hiz 9.5 tok/sn. Bu makinede RTX 4060
+  # var, CUDA varyanti 60 tok/sn veriyor -> varyanti acikca sabitliyoruz.
+  # Baska bir makinede: takma ada geri don (phi-4-mini) ya da o makinenin
+  # varyantini yaz. `foundry model info phi-4-mini` secenekleri listeler.
+  model: Phi-4-mini-instruct-cuda-gpu
   base_url: ""            # boş = Foundry Local ucu otomatik keşfedilir
   temperature: 0.2
   timeout_seconds: 120
