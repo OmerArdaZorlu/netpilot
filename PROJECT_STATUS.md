@@ -139,6 +139,55 @@ ayrıştırıyordu ve hiç çalışmamıştı. Sürüm yükseltmelerinde bu yüz
 kırılabilir — `ntc/ai/foundry.py` içindeki keşif JSON ayrıştırmasına ve metin
 regex yedeğine dayanıyor, ikisi de `_parse_status_url` testinde kayıtlı.
 
+### ✅ Foundry CUDA bellek hatası — çözüldü (2026-08-24)
+
+Panel testinde AI analizi düşüyordu:
+
+```
+HTTP 500 — onnxruntime::BFCArena::AllocateRawInternal
+Failed to allocate memory for requested buffer of size 17461248
+```
+
+**Sebep donanım yetersizliği değildi.** Ölçüm sırasında CUDA ve OpenVINO
+varyantlarını defalarca yükleyip boşaltmıştım; Foundry daemon'ı bu belleği
+geri vermiyor. `nvidia-smi`: **7903 MiB / 8188 MiB kullanımda, 55 MiB boş.**
+
+**Çözüm:** `foundry server stop` → VRAM anında 0 MiB'a düştü → `server start`.
+Sonrasında yük altında 4 analiz turu: **3 × 200, 0 × 500.** Gecikme 15.7 sn,
+gerçek özet üretildi.
+
+**Teşhis refleksi:** Foundry 500 + `AllocateRawInternal` görürsen önce
+`nvidia-smi` ile boş VRAM'e bak; doluysa daemon'ı yeniden başlat. Model
+yükleme/boşaltma döngüsü yapan her test seansından sonra bu birikiyor.
+
+**⚠️ Kalan risk — pay dar.** Model yüklüyken GPU yine 7903 MiB'da duruyor
+(ONNX Runtime arena'yı baştan büyük alıyor). Başka bir GPU tüketicisi
+(oyun, tarayıcı, Epic Games Launcher — testte açıktı) devreye girerse hata
+tekrar edebilir. Kritik bir kurulumda ya GPU'yu ayırmak ya OpenVINO
+varyantına dönmek gerekir.
+
+### ✅ `extract_json` yıkıcı fence ayrıştırması — düzeltildi (2026-08-24)
+
+Aynı testte ikinci bir hata çıktı, bu sefer bizim kodumuzda:
+
+```
+AI analizi başarısız: yanıtta JSON bulunamadı:
+'```ple bir JSON formatında sonucun:
+
+```json
+{"summary": ...'
+```
+
+Model bozuk bir kod bloğu açıp (` ```ple `) ardından doğru ` ```json `
+bloğunu vermişti. `extract_json` ilk ` ``` ` çiftini yakalayıp **`text`'in
+üstüne yazıyordu**; gerçek JSON'u içeren kısım kayboluyor, süslü parantez
+taraması da artık yanlış metinde çalışıyordu.
+
+**Düzeltme:** bloklar sırayla aday olarak deneniyor, hiçbiri tutmazsa **ham
+metne** dönülüyor — arama alanı asla daraltılmıyor. Parantez tarayıcısı
+`_scan_object` olarak ayrıldı ve iki yerde de kullanılıyor.
+`scratchpad/t_json.py`: 14 vaka, üretimde kırılan tam senaryo dahil.
+
 ### 🔴 Windows Server lab yok
 
 Kullanıcının makinesi **Windows 11 Home Single Language**, `WORKGROUP`'ta:
@@ -200,25 +249,70 @@ Server 2025 Evaluation (ücretsiz, 180 gün) / Azure VM / Win11 Pro yükseltme.
    **Çıktı:** akış başına verilen hız + kenar kullanımı, cihaz başına
    "şu kadarını geri çek" listesi, doymuş kenarlar (darboğaz).
 
-   **Doğrulama:** 7 senaryo, cevapları elle hesaplanabilir —
+   **Doğrulama:** 9 senaryo, cevapları elle hesaplanabilir —
    `scratchpad/t_flowopt.py`. Darboğaz paylaşımı, sınıf önceliği, çok kenara
    bölme, sayaçlı hattan kaçınma, LAN/WAN ayrımı, bozuk hattan kaçınma,
-   ulaşılamaz hedef. Gerçek simüle trafikte de koşturuldu: 425 Mbps talep /
+   ulaşılamaz hedef, asgari garanti, yanlış etiketlenmiş dev akış.
+   Gerçek simüle trafikte de koşturuldu: 425 Mbps talep /
    350 Mbps kapasite → üç WAN çıkışı da doldu, realtime-interactive-streaming
    %100, bulk %47, background %0.
 
-   **⚠️ Katı öncelik en alt sınıfı tamamen aç bırakıyor.** Ölçümde
-   `background` %0 aldı. DNS ve keepalive o sınıfta ve küçük olsalar da
-   kesilmeleri kabul edilemez. **Sınıf başına asgari garanti eklenmeli** —
-   şu an yok, bilinçli bir eksik.
+   **✅ Asgari garanti eklendi.** Katı öncelik en alt sınıfı aç bırakıyordu
+   (`background` %0). Çözüm iki turlu: 1. turda her sınıf yalnız **tabanı**
+   kadar talep edebiliyor, 2. turda kalan kapasite katı önceliğe göre
+   dağıtılıyor.
+
+   *İlk denemem yanlıştı ve ölçümle yakalandı:* taban **talebin** oranıydı,
+   talep büyüyünce tabanlar da büyüyor ve üst sınıfların tabanları kapasiteyi
+   bitiriyordu — 1245 Mbps talep / 350 kapasite ile `background` yine %0
+   çıktı. Taban artık **kapasitenin** dilimi (`CLASS_FLOOR_SHARE`, toplam
+   %38) ve taban turu küçükten büyüğe işleniyor: büyük bir sınıfın tabanı,
+   küçük ama hayati bir sınıfın tabanını yiyemiyor.
+
+   Aynı baskı altında sonuç: realtime %100, interactive %76, streaming %6,
+   bulk %5, **background %100**.
 
    **⚠️ Tam sözlüksel max-min adalet değil.** Sınıf içinde tek turlu
    yaklaşım; ikinci aşama birinci aşamada eşitlenmiş akışlardan bazılarını
    daha fazla besleyebilir. Gerçek adalet turlu darboğaz sabitlemesi ister.
 
-   **Henüz bağlanmadı:** çözücü `controller.py` döngülerine takılmadı,
-   panelde görünmüyor, `Flow`'a yol alanı eklenmedi. Şu an kütüphane olarak
-   duruyor ve tek başına çalışıyor.
+   **✅ Sisteme bağlandı.** `controller.py`'a beşinci döngü olarak
+   (`_flow_loop`, 15 sn) eklendi. LP saf CPU işi olduğu için
+   `asyncio.to_thread` ile ayrı iş parçacığında koşuyor — olay döngüsünü
+   kilitlemiyor.
+
+   | Uç | Ne döner |
+   |---|---|
+   | `GET /api/status` → `flow` | özet: talep, verilen, geri çekme sayısı, darboğazlar |
+   | `GET /api/flow/plan` | son çözümün tamamı |
+   | `POST /api/flow/solve` | beklemeden yeniden çöz |
+   | `GET /api/flow/topology` | grafik (18 kenar, 8 düğüm) |
+
+   Ayarlar `config.yaml` → `flow:` (enabled / interval_seconds /
+   min_pullback_mbps) ve isteğe bağlı `topology:` bloğu; blok yoksa
+   `link:` kapasitelerinden varsayılan topoloji kuruluyor.
+
+   **✅ Panele bağlandı** (2026-08-24). `index.html` içinde "Akış planı"
+   kartı: çıkış diyagramı (SVG, kapasite ↔ bant yüksekliği, yük ↔ bağlantı
+   kalınlığı, doluluk ↔ renk), sınıf başına karşılanma çubukları, geri çekme
+   listesi, doymuş kenar rozetleri, "Şimdi hesapla" düğmesi. Mevcut tasarım
+   sistemi kullanıldı (`.meter`, `.classrow`, `.feed`, `utilColor`).
+
+   **⚠️ Varsayılan topoloji hatası — düzeltildi.** İlk sürüm varsayılan olarak
+   üç WAN çıkışı kuruyordu (fiber 200 + yedek 100 + LTE 50 = 350 Mbps), oysa
+   `link:` tek bir 200 Mbps hat tanımlıyor. Sonuç: gerçek hat %92 doluyken
+   panel "darboğaz yok" diyordu — **panel ile ölçüm birbirini yalanlıyordu.**
+   Varsayılan artık `link:` ile birebir tek çıkış; çoklu çıkış `topology:`
+   bloğuyla açıkça tanımlanıyor (`config.yaml`'da örnek yorum olarak var).
+
+   **Kural: varsayılan topoloji yapılandırmadaki kapasiteyi aşmaz.**
+
+   Doğrulama (tıkanma senaryosu, headless Edge ile ekran görüntüsü):
+   ölçüm 210.1 / 200 Mbps → çözücü tam 200 veriyor, 2 darboğaz, 10.1 Mbps'i
+   üç cihazdan geri çekiyor. Sıkışma yalnız `bulk` sınıfına yansıyor
+   (%90), gerçek zamanlı ve arka plan %100.
+
+   **Hâlâ eksik:** `Flow`'a yol alanı eklenmedi, uygulayan infaz katmanı yok.
 
    **⚠️ Windows kısıtı yerinde duruyor:** RRAS politika tabanlı yönlendirme
    yapamıyor. Çözücünün ürettiği yol kararı saf Windows'ta doğrudan
@@ -724,24 +818,92 @@ uygulanıp gözden geçirmeye bırakılması). Masada duruyor.
 
 ## 6. Teknik borç
 
-- **README `netpilot` olarak güncellenmedi** — hâlâ "Network Traffic Controller"
-  başlığı var. Description paragrafı da hazırlandı ama işlenmedi.
-- **`config.py` içindeki `_build()` iç içe dataclass yolu ölü kod.**
-  `from __future__ import annotations` yüzünden `f.type` bir string, dolayısıyla
-  `is_dataclass(f.type)` hiçbir zaman doğru olmuyor. Şu an zararsız (üst seviye
-  `_NESTED` haritası işi görüyor) ama `AIConfig` gibi bir sınıfa iç içe alan
-  eklenirse sessizce çalışmaz. Ya düzelt ya sil.
-- **Panel görsel olarak denetlenmedi** — makinede headless tarayıcı yok,
-  izinsiz kurulmadı. Söz dizimi ve HTTP servisi doğrulandı, düzen doğrulanmadı.
-- **🔴 İstemler küçük model gerçeğine göre yazılmadı.** `ntc/ai/prompts.py`
-  Faz 1'de yalnızca mock sağlayıcıyla test edilmişti. Gerçek phi-4-mini ile
-  çalıştırıldığında model çerçeveyi kaçırıyor: ağ anlık görüntüsünü yorumlamak
-  yerine *kural motoru hakkında* uydurma bulgular üretti
-  ("Kural Motoru Yanlış Anlamalar", "streaming trafiğini karıştırıyor").
-  Mock sağlayıcı doğru şekilli JSON döndürdüğü için boru hattı yeşil görünüyordu
-  — **şekil doğruluğu içerik doğruluğu değil.** Sıradaki iş listesinde.
+*(2026-08-24'te sistematik tarama yapıldı: AST taraması + tüm uçların
+çalıştırılması + yük altında log incelemesi. Aşağıdakiler kapatıldı.)*
 
----
+### ✅ Kapatılanlar
+
+| Borç | Ne yapıldı |
+|---|---|
+| README `netpilot` olarak güncellenmedi | Başlık, kapsam, mimari şeması, API tablosu, yol haritası güncellendi |
+| `config.py` `_build()` iç içe dataclass yolu ölü kod | `get_type_hints` ile çözüldü; iç içe dataclass artık **gerçekten** kuruluyor (testle kanıtlandı) |
+| Panel görsel olarak denetlenmedi | Edge headless ile denetlendi, bir okunabilirlik hatası bulunup düzeltildi |
+| Foundry sağlayıcısı test edilmedi | Gerçek serviste doğrulandı, 4 kusur çıktı ve düzeltildi |
+| `extract_json` yıkıcı fence ayrıştırması | Adaylar sırayla deneniyor, ham metne dönülüyor (14 vaka) |
+| `optimizer._check_downlink` kategori hatası | Hat doluluğunu `hog_share_threshold` ile kıyaslıyordu — kaldırıldı |
+| `server.py` WebSocket `except Exception: pass` | `log.exception` ile değiştirildi |
+| Kullanılmayan importlar | `asyncio`, `TrafficClass`, `time`, `DeviceKind` silindi |
+| İstem şişmesi → ONNX bellek hatası | Yuvarlama + sıfır alan atlama + `max_snapshot_chars` sert tavanı; istem 5055 → 3216 karakter |
+
+### ✅ Akış çözücüsü kapsam boşluğu — kapatıldı (2026-08-24)
+
+Sistematik denetimde çıktı: çözücü ağın **yalnızca üçte birini** görüyordu.
+
+```
+ölçülen: indirme 182 + yükleme 58 + LAN 331 = 572 Mbps
+çözücüye giren: 182 Mbps          görmediği: 390 Mbps
+darboğaz raporu: "yok"            gerçek: yükleme hattı %292 dolu
+```
+
+Üç ayrı kusur:
+
+1. **`demands_from_signals` yalnız `down_bps` okuyordu.** Yükleme hiç
+   modellenmiyordu — üstelik yükleme **daha dar** kaynak (20 vs 200 Mbps) ve
+   doygunluk önce orada oluyor.
+2. **`lan_targets` hiç doldurulmuyordu.** Topolojideki `nvr` / `srv-file`
+   düğümlerine hiçbir talep ulaşmıyordu; o kenarlar ölüydü. Kullanıcının
+   "iç ağı optimize et" dediği trafik tam olarak buydu.
+3. **Topolojideki yönler fiziksel olarak ters yazılmıştı.** İndirme kapasitesi
+   `cihaz → internet` kenarlarına konmuştu. Tek yön modellendiği sürece fark
+   etmiyordu; yükleme eklenince yükleme, indirme kapasitesini tüketmeye
+   başlayacaktı.
+
+**Yapılan:** `Demand`'a `src` ve `direction` alanları eklendi; talep üretici
+üç yönü de (indirme / yükleme / LAN) üretiyor; LAN hedefi cihaz türünden
+türetiliyor (kamera→NVR, sunucu→dosya sunucusu); topoloji yönleri
+düzeltildi; `pullbacks()` artık yönü de bildiriyor — indirmeyi kısmakla
+yüklemeyi kısmak farklı aksiyonlar ve farklı yerde uygulanıyor.
+
+Doğrulama: kapsam %32 → **%100** (555/555 Mbps, 57 talep), darboğaz raporu
+yükleme hattını doğru buluyor. Test 10-12 eklendi (asimetrik hat, yükleme
+doygunluğu, LAN'ın WAN'ı tüketmemesi).
+
+### ✅ Akış planı artık kalıcı
+
+`flow_plans` tablosu + `GET /api/flow/history`. Saklanan: toplamlar, geri
+çekmeler, darboğazlar — "geçen hafta hangi cihaz en çok kısıldı" sorusunu
+cevaplayan alanlar. Tam kenar dökümü saklanmıyor (pahalı ve sorulmuyor).
+
+### 🔴 Açık kalanlar
+
+- **`prompts.py` istem kalitesi.** Yapısal hatalar düzeldi (LAN/WAN karıştırma,
+  kendi kanıtıyla çelişme, geçersiz hedef) ama model hâlâ önem derecesini
+  abartıyor. Eşiği isteme yazmak **işe yaramadı** (ölçüldü: `down_utilization`
+  0.175 iken "critical" dedi). Deterministik kalibrasyon eklendi ama yalnız
+  eşiği olan iki metriği kapsıyor. **Asıl soru açık: analist bağımsız tespit
+  yapmaya devam mı etsin, yoksa kural motorunun bulgularını açıklayan role mi
+  çekilsin?** (Bkz. 1. mimari ilke — kod ilkeyle uyumsuz.)
+- **`Flow`'a yol alanı eklenmedi.** Çözücü yolu hesaplıyor, akış kaydına
+  yazılmıyor.
+- **`class_mix` yön ayrımı yapmıyor.** İndirme ve yükleme aynı sınıf
+  karışımıyla bölünüyor. Gerçekte yükleme profili farklı (yedekleme
+  yüklemede baskın). `metrics.py` tarafında yön başına sınıf dağılımı
+  ayrılmadan düzelmez.
+- **İnfaz katmanı yok.** Üretilen plan bir *hedef durum*; `applied` alanı
+  yalnız bir boolean, tüketen kod yok.
+- **Foundry VRAM payı dar.** Model yüklüyken GPU 7903/8188 MiB'da duruyor;
+  başka bir GPU tüketicisi devreye girerse hata dönebilir.
+
+### Doğrulama durumu
+
+```
+5 test paketi (t_parse, t_targets, t_sev, t_json, t_flowopt, t_snap)  GECTI
+derleme                                                               temiz
+panel JS (node --check)                                               temiz
+AST taramasi (kullanilmayan import / olu kod)                         temiz
+16 API ucu + WebSocket, 5 senaryo yuk altinda                         200
+AI cagrilari yuk altinda                                    5x200, 0x500
+```
 
 ## 7. Çalışma anlaşmaları
 

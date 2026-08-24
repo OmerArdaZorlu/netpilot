@@ -53,6 +53,17 @@ CREATE TABLE IF NOT EXISTS ai_reports (
 );
 CREATE INDEX IF NOT EXISTS idx_reports_ts ON ai_reports(ts DESC);
 
+-- Akış çözücüsünün kararları. Tam plan (kenar kenar döküm) saklanmıyor;
+-- saklanan, sonradan sorulacak şey: ne kadar talep vardı, ne kadarı
+-- karşılandı, kimden ne kadar kısıldı, hangi kenar doydu.
+CREATE TABLE IF NOT EXISTS flow_plans (
+    id TEXT PRIMARY KEY, ts REAL,
+    demand_mbps REAL, granted_mbps REAL,
+    feasible INTEGER, note TEXT,
+    pullbacks TEXT, bottlenecks TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_flowplans_ts ON flow_plans(ts DESC);
+
 CREATE TABLE IF NOT EXISTS notable_flows (
     id TEXT PRIMARY KEY, ts REAL, device_id TEXT, src_ip TEXT, dst_ip TEXT,
     src_port INTEGER, dst_port INTEGER, proto TEXT, app TEXT,
@@ -157,6 +168,37 @@ class Storage:
               report.provider, report.model, report.latency_ms, report.error)],
         )
 
+    async def save_flow_plan(self, plan_id: str, ts: float, plan) -> None:
+        """Akış planının özetini saklar.
+
+        Tam plan yüzlerce satır kenar dökümü; saklanması pahalı ve sonradan
+        sorulan şey o değil. Saklanan: toplamlar, geri çekmeler, darboğazlar —
+        "geçen hafta hangi cihaz en çok kısıldı" sorusunu cevaplayan alanlar.
+        """
+        await self._write(
+            "INSERT OR REPLACE INTO flow_plans VALUES (?,?,?,?,?,?,?,?)",
+            [(plan_id, ts,
+              sum(a.demand.mbps for a in plan.allocations),
+              sum(a.granted_mbps for a in plan.allocations),
+              1 if plan.feasible else 0, plan.note,
+              json.dumps(plan.pullbacks(), ensure_ascii=False),
+              json.dumps(plan.bottlenecks(), ensure_ascii=False))],
+        )
+
+    async def recent_flow_plans(self, limit: int = 50) -> list[dict]:
+        rows = await self._read(
+            "SELECT id, ts, demand_mbps, granted_mbps, feasible, note, "
+            "pullbacks, bottlenecks FROM flow_plans ORDER BY ts DESC LIMIT ?",
+            (limit,))
+        return [{
+            "id": r["id"], "ts": r["ts"],
+            "demand_mbps": round(r["demand_mbps"] or 0.0, 2),
+            "granted_mbps": round(r["granted_mbps"] or 0.0, 2),
+            "feasible": bool(r["feasible"]), "note": r["note"],
+            "pullbacks": json.loads(r["pullbacks"] or "[]"),
+            "bottlenecks": json.loads(r["bottlenecks"] or "[]"),
+        } for r in rows]
+
     async def save_notable_flows(self, flows: Iterable[Flow]) -> None:
         rows = [
             (f.id, f.ts, f.device_id, f.src_ip, f.dst_ip, f.src_port, f.dst_port,
@@ -224,7 +266,7 @@ class Storage:
             def _prune() -> int:
                 total = 0
                 for table in ("metric_samples", "alerts", "actions",
-                              "ai_reports", "notable_flows"):
+                              "ai_reports", "notable_flows", "flow_plans"):
                     cur = conn.execute(f"DELETE FROM {table} WHERE ts < ?", (cutoff,))
                     total += cur.rowcount
                 conn.commit()

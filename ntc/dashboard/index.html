@@ -52,6 +52,29 @@ body {
 a { color: inherit; }
 h1, h2, h3 { margin: 0; font-weight: 600; }
 
+/* ------------------------------------------------------------ akış planı */
+.flow-grid { display: grid; grid-template-columns: 1.25fr 1fr; gap: 24px; }
+@media (max-width: 900px) { .flow-grid { grid-template-columns: 1fr; } }
+.flow-h {
+  font-size: 12px; font-weight: 600; letter-spacing: .04em;
+  text-transform: uppercase; color: var(--muted); margin-bottom: 10px;
+}
+.flow-sat {
+  display: grid; grid-template-columns: 92px 1fr auto;
+  gap: 10px; align-items: center; margin-bottom: 9px; font-size: 12px;
+}
+.flow-sat .name { color: var(--ink-2); }
+.flow-sat .track {
+  position: relative; height: 10px; background: var(--grid);
+  border-radius: 4px; overflow: hidden;
+}
+/* Talep tam genişlik, karşılanan onun içinde dolu kısım — ikisi üst üste
+   olduğu için "ne kadarı verilebildi" tek bakışta okunuyor. */
+.flow-sat .got { position: absolute; inset: 0 auto 0 0; border-radius: 4px;
+                 transition: width .4s ease; }
+.flow-sat .val { font-variant-numeric: tabular-nums; color: var(--ink-2); }
+.flow-sat .val b { color: var(--ink); font-weight: 600; }
+
 /* ---------------------------------------------------------------- layout */
 header {
   display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
@@ -246,6 +269,33 @@ svg text { fill: var(--muted); font-size: 10px; }
     </div>
   </section>
 
+  <section class="card" id="flow-card">
+    <header>
+      <h2>Akış planı</h2>
+      <span class="sub" id="flow-sub">hesaplanıyor…</span>
+      <span style="flex:1"></span>
+      <button id="flow-btn">Şimdi hesapla</button>
+    </header>
+
+    <div class="flow-grid">
+      <div>
+        <h3 class="flow-h">Trafik hangi çıkıştan akıyor</h3>
+        <div class="chart-wrap">
+          <svg id="flow-svg" width="100%" role="img"
+               aria-label="Ağ çıkışlarına dağıtılan trafik"></svg>
+        </div>
+        <div id="flow-egress"></div>
+      </div>
+
+      <div>
+        <h3 class="flow-h">Sınıf başına karşılanma</h3>
+        <div id="flow-classes"></div>
+        <h3 class="flow-h" style="margin-top:20px">Geri çekilecekler</h3>
+        <div class="feed" id="flow-pullbacks"></div>
+      </div>
+    </div>
+  </section>
+
   <section class="card">
     <header><h2>Simülasyon senaryoları</h2>
       <span class="sub">demo için trafik olayı tetikle</span></header>
@@ -302,9 +352,11 @@ function utilLabel(u) {
 }
 
 /* ==================================================================== durum */
+const DIR_LABEL = { down: "indirme", up: "yükleme", lan: "LAN içi" };
 const state = {
   status: null, live: null, devices: [], alerts: [], policies: [],
   report: null, history: [], scenarios: [], available: [],
+  flow: null, topology: null,
 };
 const MAX_POINTS = 180;
 
@@ -322,17 +374,20 @@ const postJSON = (path, body) => api(path, {
 
 async function refreshSlow() {
   try {
-    const [status, devices, actions, scenarios] = await Promise.all([
+    const [status, devices, actions, scenarios, flow] = await Promise.all([
       api("/api/status"), api("/api/devices"),
       api("/api/actions"), api("/api/sim/scenarios"),
+      // Plan 15 sn'de bir yenileniyor; burada okumak ayrı bir döngüden ucuz.
+      api("/api/flow/plan").catch(() => null),
     ]);
     state.status = status;
     state.devices = devices;
     state.policies = actions.active;
     state.scenarios = scenarios.active;
     state.available = scenarios.available;
+    if (flow) state.flow = flow;
     renderHeader(); renderTiles(); renderDevices();
-    renderPolicies(); renderScenarios();
+    renderPolicies(); renderScenarios(); renderFlow();
   } catch (err) { console.warn("durum alınamadı", err); }
 }
 
@@ -356,6 +411,9 @@ async function seed() {
     state.alerts = alerts;
     if (report) state.report = report;
     renderChart(); renderAlerts(); renderAI();
+    // Topoloji çalışma anında değişmiyor; bir kez çekiliyor.
+    state.topology = await api("/api/flow/topology").catch(() => null);
+    renderFlow();
   } catch (err) { console.warn("ilk yükleme", err); }
 }
 
@@ -709,6 +767,170 @@ function renderAI() {
               <div class="feed">${recs}</div>` : ""}`;
 }
 
+/* ------------------------------------------------------------- akış planı */
+
+/* Çıkış kenarları = internete varan WAN bacakları. Topoloji yapılandırmadan
+   geldiği için düğüm adlarını varsaymıyoruz; `kind` ve hedef üzerinden
+   bulunuyor. */
+/* WAN bacakları — iki yön ayrı satır.
+   Topolojide yön fiziksel: internete GİDEN kenar yükleme, internetten GELEN
+   kenar indirme. Yalnız birini çizmek yanıltıyordu; hat asimetrik (200/20) ve
+   doygunluk çoğu zaman dar olan yükleme tarafında oluyor. */
+function egressEdges() {
+  const topo = state.topology;
+  if (!topo) return [];
+  const load = state.flow?.edge_load || {};
+  const rows = [];
+  topo.edges.forEach((e) => {
+    if (e.effective_mbps <= 0) return;
+    let name = null, dir = null;
+    if (e.dst === "internet") { name = e.src; dir = "yükleme"; }
+    else if (e.src === "internet") { name = e.dst; dir = "indirme"; }
+    if (!name) return;
+    const used = load[`${e.src}->${e.dst}`] || 0;
+    rows.push({ name, dir, cap: e.effective_mbps, load: used,
+                u: used / e.effective_mbps,
+                cost: e.cost_per_gb, health: e.health });
+  });
+  // İndirme önce (genelde daha büyük), sonra yükleme; aynı bacak yan yana.
+  rows.sort((a, b) => a.name.localeCompare(b.name) ||
+                      a.dir.localeCompare(b.dir));
+  return rows;
+}
+
+function renderFlowDiagram() {
+  const svg = $("#flow-svg");
+  svg.innerHTML = "";
+  const legs = egressEdges();
+  if (!legs.length) return;
+
+  const W = svg.clientWidth || 460;
+  const GAP = 10, PAD = 12, MINH = 52;
+  const totalCap = legs.reduce((a, l) => a + l.cap, 0) || 1;
+
+  // Bant yüksekliği kapasiteyle orantılı ama okunabilir bir tabanı var; o
+  // yüzden toplam yüksekliği bantlardan türetiyoruz, sabit bir kutuya
+  // sıkıştırmıyoruz. Sıkıştırmak en alttaki bandı kırpıyordu.
+  const heights = legs.map((l) => Math.max(MINH, (l.cap / totalCap) * 190));
+  const H = PAD * 2 + heights.reduce((a, h) => a + h, 0) + GAP * (legs.length - 1);
+  svg.setAttribute("height", H);
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+
+  const leftW = 68, rightW = 68;
+  const leftX = PAD, rightX = W - rightW - PAD;
+  const midX = leftX + leftW + 34, midW = rightX - midX - 34;
+  const total = legs.reduce((a, l) => a + l.load, 0);
+
+  const add = (n, at, txt) => { const e = el(n, at, txt); svg.appendChild(e); return e; };
+  const endcap = (x, label, value) => {
+    add("rect", { x, y: PAD, width: leftW, height: H - PAD * 2, rx: 5,
+                  fill: "var(--grid)" });
+    add("text", { x: x + leftW / 2, y: H / 2 - (value ? 4 : -4),
+                  "text-anchor": "middle", "font-size": 12,
+                  "font-weight": 600, fill: "var(--ink)" }, label);
+    if (value) add("text", { x: x + leftW / 2, y: H / 2 + 13,
+                             "text-anchor": "middle", "font-size": 11,
+                             fill: "var(--ink-2)" }, value);
+  };
+
+  endcap(leftX, "ağ", `${fmt(total)} Mbps`);
+  endcap(rightX, "internet", null);
+
+  let y = PAD;
+  legs.forEach((leg, i) => {
+    const h = heights[i], color = utilColor(leg.u);
+    const u = Math.max(0, Math.min(1, leg.u));
+
+    add("rect", { x: midX, y, width: midW, height: h, rx: 4,
+                  fill: "var(--surface)", stroke: "var(--axis)",
+                  "stroke-width": 1 });
+
+    // Bağlantı kalınlığı taşınan yüke orantılı: boş hat ince çizgi kalıyor,
+    // dolu hat kalın bant. Hangi çıkışın çalıştığı bakışta görünüyor.
+    const t = Math.max(1.5, (leg.load / totalCap) * 170);
+    const cy = y + h / 2;
+    [[leftX + leftW, midX - leftX - leftW], [midX + midW, rightX - midX - midW]]
+      .forEach(([bx, bw]) => add("rect", { x: bx, y: cy - t / 2, width: bw,
+                                           height: t, fill: color, opacity: .5 }));
+
+    // Etiket düz zeminde — dolgunun üstüne binmiyor.
+    const tag = `${leg.name} · ${leg.dir}` +
+                (leg.cost > 0 ? "  ₺ sayaçlı" : "") +
+                (leg.health < 1 ? `  ⚠ sağlık %${Math.round(leg.health * 100)}` : "");
+    add("text", { x: midX + 12, y: y + 20, "font-size": 12,
+                  "font-weight": 600, fill: "var(--ink)" }, tag);
+    add("text", { x: midX + midW - 12, y: y + 20, "text-anchor": "end",
+                  "font-size": 11.5, fill: "var(--ink-2)" },
+        `${fmt(leg.load)} / ${fmt(leg.cap, 0)} Mbps · ${pct(leg.u)}`);
+
+    // Doluluk şeridi, metnin altında ayrı bir bant olarak.
+    const bx = midX + 12, bw = midW - 24, by = y + h - 20;
+    add("rect", { x: bx, y: by, width: bw, height: 8, rx: 4, fill: "var(--grid)" });
+    add("rect", { x: bx, y: by, width: bw * u, height: 8, rx: 4, fill: color });
+
+    y += h + GAP;
+  });
+}
+
+function renderFlow() {
+  const f = state.flow;
+  const sub = $("#flow-sub");
+  if (!f || f.solved === false) {
+    sub.textContent = f?.note || "çözüm bekleniyor";
+    $("#flow-classes").innerHTML = '<p class="empty">Henüz çözüm yok.</p>';
+    $("#flow-pullbacks").innerHTML = "";
+    $("#flow-egress").innerHTML = "";
+    return;
+  }
+
+  const dem = f.total_demand_mbps || 0, got = f.total_granted_mbps || 0;
+  const bn = f.bottlenecks || [];
+  sub.textContent = `${fmt(got)} / ${fmt(dem)} Mbps karşılandı` +
+    (bn.length ? ` · ${bn.length} darboğaz` : " · darboğaz yok");
+
+  renderFlowDiagram();
+
+  $("#flow-egress").innerHTML = bn.length
+    ? `<p class="empty" style="margin-top:10px">Doymuş: ` +
+      bn.map((b) => `<span class="badge">${esc(b.edge)} ${pct(b.utilization)}</span>`)
+        .join(" ") + `</p>`
+    : "";
+
+  // Sınıf başına: talep ne kadardı, ne kadarı verilebildi.
+  const per = {};
+  (f.allocations || []).forEach((a) => {
+    const r = per[a.traffic_class] || (per[a.traffic_class] = { d: 0, g: 0 });
+    r.d += a.demand_mbps; r.g += a.granted_mbps;
+  });
+  const rows = CLASS_ORDER.filter((c) => per[c]);
+  $("#flow-classes").innerHTML = rows.length ? rows.map((cls) => {
+    const r = per[cls], ratio = r.d > 0 ? r.g / r.d : 1;
+    return `<div class="flow-sat">
+      <span class="name">${esc(CLASS_LABEL[cls])}</span>
+      <span class="track">
+        <span class="got" style="width:${ratio * 100}%;
+              background:${CLASS_COLOR[cls]}"></span>
+      </span>
+      <span class="val"><b>${pct(ratio)}</b> · ${fmt(r.g)}/${fmt(r.d)}</span>
+    </div>`;
+  }).join("") : '<p class="empty">Talep yok.</p>';
+
+  const pulls = f.pullbacks || [];
+  $("#flow-pullbacks").innerHTML = pulls.length ? pulls.map((r) => `
+    <div class="item">
+      <span class="dot" style="background:var(--warning)"></span>
+      <div class="body">
+        <div class="title">${esc(r.device)}
+          <span class="badge">${esc(DIR_LABEL[r.direction] ?? r.direction)}</span>
+          <span class="badge">−${fmt(r.pullback_mbps)} Mbps</span></div>
+        <div class="detail">İstediği ${fmt(r.demand_mbps)} Mbps, ağın
+          verebildiği ${fmt(r.granted_mbps)} Mbps.</div>
+        <div class="when">${r.classes.map((c) => CLASS_LABEL[c] ?? c).join(", ")}</div>
+      </div>
+    </div>`).join("")
+    : '<p class="empty">Herkesin talebi karşılanıyor.</p>';
+}
+
 function renderScenarios() {
   const labels = {
     congestion: "Tıkanma", bandwidth_hog: "Bant canavarı", port_scan: "Port taraması",
@@ -744,6 +966,21 @@ document.addEventListener("click", async (evt) => {
     await refreshSlow();
   }
 });
+
+$("#flow-btn").addEventListener("click", async (evt) => {
+  const btn = evt.currentTarget;
+  btn.disabled = true; btn.textContent = "hesaplanıyor…";
+  try {
+    state.flow = await postJSON("/api/flow/solve");
+    renderFlow();
+  } catch (err) {
+    $("#flow-sub").textContent = `hesaplanamadı: ${err.message}`;
+  } finally { btn.disabled = false; btn.textContent = "Şimdi hesapla"; }
+});
+
+// Bant genişliği değişince diyagram yeniden çiziliyor; SVG viewBox
+// kapsayıcının genişliğinden türetiliyor.
+window.addEventListener("resize", () => { if (state.flow) renderFlowDiagram(); });
 
 $("#analyze-btn").addEventListener("click", async (evt) => {
   const btn = evt.currentTarget;

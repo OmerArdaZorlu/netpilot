@@ -66,6 +66,16 @@ class AIReport:
         return d
 
 
+def _snapshot_json(snapshot: dict[str, Any]) -> str:
+    """Snapshot'ı modele gidecek biçimde metne çevirir.
+
+    Girinti yok: `indent=2` sırf boşluk için ~%20 token harcıyordu ve model
+    için hiçbir şey değiştirmiyor. Budama da isteme giden metnin **aynısını**
+    ölçmeli, yoksa bütçe tutmuyor.
+    """
+    return json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
+
+
 class AIAnalyst:
     def __init__(self, cfg: AIConfig, provider: LLMProvider) -> None:
         self.cfg = cfg
@@ -73,6 +83,30 @@ class AIAnalyst:
         self.last_report: AIReport | None = None
 
     # ------------------------------------------------------------- anlık görüntü
+
+    @staticmethod
+    def _trim_snapshot(snapshot: dict[str, Any], max_chars: int) -> dict[str, Any]:
+        """Snapshot'ı karakter bütçesine sığdırır — en az trafikli cihazı atarak.
+
+        Neden sert tavan: model bağlamı 4096 token ve `lm_head` çıktısı istem
+        uzunluğuyla büyüyor. Yük altında snapshot şişince ONNX Runtime 1.2 GB
+        ayırmaya çalışıp düştü (ölçüldü). Cihaz sayısına güvenmek yetmiyor —
+        bir cihazın satırı da şişebilir. Bütçe karakterden gidiyor.
+
+        Cihazlar zaten trafiğe göre sıralı; kuyruktan atmak en az bilgi
+        kaybettiren kesim. Kaç tanesinin atıldığı snapshot'a yazılıyor ki
+        model eksik veriye baktığını bilsin.
+        """
+        if len(_snapshot_json(snapshot)) <= max_chars:
+            return snapshot
+        rows = snapshot.get("devices") or []
+        dropped = 0
+        while len(rows) > 1 and                 len(json.dumps(snapshot, ensure_ascii=False)) > max_chars:
+            rows.pop()
+            dropped += 1
+        if dropped:
+            snapshot["devices_omitted"] = dropped
+        return snapshot
 
     def build_snapshot(self, metrics: MetricsEngine, devices: dict[str, Device],
                        optimizer: TrafficOptimizer | None = None) -> dict[str, Any]:
@@ -89,24 +123,38 @@ class AIAnalyst:
         ranked = sorted(signals.values(), key=lambda s: s.total_bps, reverse=True)
         for sig in ranked[: self.cfg.max_snapshot_flows]:
             device = devices.get(sig.device_id)
-            device_rows.append({
+            # Sıfır olan alanlar yazılmıyor ve her sayı yuvarlanıyor.
+            # Yuvarlamamak ölçülebilir zarar veriyordu: `avg_rtt_ms` ham float
+            # olarak gidiyordu (46.432198712...), on cihazla bu tek başına
+            # yüzlerce token. Uzun istem `lm_head` çıktısını büyütüyor ve
+            # ONNX Runtime 1.2 GB ayırmaya çalışıp düşüyordu.
+            row: dict[str, Any] = {
                 "hostname": device.hostname if device else sig.device_id,
                 "kind": device.kind.value if device else "unknown",
-                "trust": round(device.trust, 2) if device else None,
                 "wan_down_mbps": round(sig.down_bps / 1e6, 2),
                 "wan_up_mbps": round(sig.up_bps / 1e6, 2),
-                "lan_mbps": round(sig.lan_bps / 1e6, 2),
                 "flows": sig.flow_count,
-                "unique_dst_ips": sig.unique_dst_ips,
-                "unique_dst_ports": sig.unique_dst_ports,
-                "lateral_flows": sig.lateral_flows,
-                "avg_rtt_ms": sig.avg_rtt_ms,
-                "retransmit_rate": sig.retransmit_rate,
+                "avg_rtt_ms": round(sig.avg_rtt_ms, 1),
                 "top_app": sig.top_app,
-                "class_mix": sig.class_mix,
-            })
+                "class_mix": {k: round(v, 2) for k, v in
+                              (sig.class_mix or {}).items() if v >= 0.01},
+            }
+            if device is not None:
+                row["trust"] = round(device.trust, 2)
+            for key, value, digits in (
+                ("lan_mbps", sig.lan_bps / 1e6, 2),
+                ("retransmit_rate", sig.retransmit_rate, 4),
+            ):
+                if value:
+                    row[key] = round(value, digits)
+            for key, value in (("unique_dst_ips", sig.unique_dst_ips),
+                               ("unique_dst_ports", sig.unique_dst_ports),
+                               ("lateral_flows", sig.lateral_flows)):
+                if value:
+                    row[key] = value
+            device_rows.append(row)
 
-        return {
+        snapshot: dict[str, Any] = {
             "window_seconds": round(stats.window_seconds, 1),
             "link": {
                 "down_mbps": round(stats.down_bps / 1e6, 2),
@@ -116,8 +164,8 @@ class AIAnalyst:
                 "up_capacity_mbps": metrics.link.uplink_mbps,
                 "down_utilization": round(stats.down_utilization, 3),
                 "up_utilization": round(stats.up_utilization, 3),
-                "avg_rtt_ms": stats.avg_rtt_ms,
-                "retransmit_rate": stats.retransmit_rate,
+                "avg_rtt_ms": round(stats.avg_rtt_ms, 1),
+                "retransmit_rate": round(stats.retransmit_rate, 4),
                 "active_flows": stats.flow_count,
                 "active_devices": stats.device_count,
             },
@@ -126,6 +174,7 @@ class AIAnalyst:
             },
             "devices": device_rows,
         }
+        return self._trim_snapshot(snapshot, self.cfg.max_snapshot_chars)
 
     @staticmethod
     def _policy_text(optimizer: TrafficOptimizer | None) -> str:
@@ -143,7 +192,7 @@ class AIAnalyst:
         snapshot = self.build_snapshot(metrics, devices, optimizer)
         valid_targets = self._valid_targets(devices)
         prompt = ANALYST_USER.format(
-            snapshot=json.dumps(snapshot, ensure_ascii=False, indent=2),
+            snapshot=_snapshot_json(snapshot),
             active_policies=self._policy_text(optimizer),
             # Hedefleri isteme yazmak, doğrulayıcının düşürdüğü öneri sayısını
             # baştan azaltıyor: model listeden seçiyor, uydurmuyor.
@@ -186,7 +235,7 @@ class AIAnalyst:
         """Yönetici için serbest metin soru-cevap."""
         snapshot = self.build_snapshot(metrics, devices, optimizer)
         prompt = QA_USER.format(
-            snapshot=json.dumps(snapshot, ensure_ascii=False, indent=2),
+            snapshot=_snapshot_json(snapshot),
             question=question,
         )
         started = time.perf_counter()

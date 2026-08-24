@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, get_type_hints
 
 import yaml
 
@@ -44,6 +44,19 @@ class OptimizerConfig:
 
 
 @dataclass
+class FlowConfig:
+    """Akış optimize edici (`flowopt.py`) ayarları."""
+
+    enabled: bool = True
+    # Optimizer'ın 5 sn'lik eşik döngüsünden ayrı ve daha seyrek: LP çözümü
+    # ucuz ama bedava değil, ve sonucu her saniye değişmiyor.
+    interval_seconds: float = 15.0
+    # Bu kadarın altındaki eksik "geri çek" listesine girmiyor — ölçüm
+    # gürültüsünü aksiyona çevirmenin anlamı yok.
+    min_pullback_mbps: float = 0.5
+
+
+@dataclass
 class AIConfig:
     provider: str = "auto"          # auto | foundry | ollama | mock
     model: str = "phi-4-mini"       # Foundry Local takma adı
@@ -52,6 +65,11 @@ class AIConfig:
     timeout_seconds: float = 120.0
     analysis_interval_seconds: float = 30.0
     max_snapshot_flows: int = 25
+    # İstem uzunluğuna sert tavan. Model bağlamı 4096 token; `lm_head` çıktısı
+    # istemle birlikte büyüyor ve yük altında ONNX Runtime 1.2 GB ayırmaya
+    # çalışıp düştü. ~3500 karakter kabaca 1100 token — analiz için yeterli,
+    # bağlamı patlatmaktan uzak.
+    max_snapshot_chars: int = 3500
 
     # Ollama geliştirme sırasında yedek olarak duruyor; model adlandırması
     # Foundry'den farklı (phi4-mini ↔ phi-4-mini), o yüzden ayrı alanlar.
@@ -90,19 +108,37 @@ class Config:
     api: APIConfig = field(default_factory=APIConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
+    flow: FlowConfig = field(default_factory=FlowConfig)
+    # Topoloji düz bir dataclass değil (kenar listesi), o yüzden ham
+    # haliyle taşınıp `Topology.from_config` tarafından ayrıştırılıyor.
+    topology_raw: dict[str, Any] | None = None
 
 
 def _build(cls: type, raw: Any) -> Any:
-    """İç içe dataclass'ları dict'ten kurar; bilinmeyen anahtarları yok sayar."""
+    """İç içe dataclass'ları dict'ten kurar; bilinmeyen anahtarları yok sayar.
+
+    `from __future__ import annotations` yüzünden `f.type` bir **string**;
+    `is_dataclass(f.type)` hiçbir zaman doğru olmuyordu ve iç içe dataclass
+    yolu sessizce ölüydü. Üst seviyede `_NESTED` işi görüyor diye fark
+    edilmiyordu, ama `AIConfig` gibi bir sınıfa iç içe alan eklendiğinde
+    hatasız şekilde yanlış çalışacaktı: dict olduğu gibi atanacaktı.
+
+    Çözüm: anotasyonları `get_type_hints` ile gerçek tiplere çöz.
+    """
     if not isinstance(raw, dict):
         return cls()
+    try:
+        hints = get_type_hints(cls)
+    except Exception:          # ileriye dönük referans çözülemezse
+        hints = {}
     kwargs: dict[str, Any] = {}
     for f in fields(cls):
         if f.name not in raw:
             continue
         value = raw[f.name]
-        if is_dataclass(f.type) if isinstance(f.type, type) else False:
-            kwargs[f.name] = _build(f.type, value)  # type: ignore[arg-type]
+        hint = hints.get(f.name)
+        if isinstance(hint, type) and is_dataclass(hint):
+            kwargs[f.name] = _build(hint, value)
         else:
             kwargs[f.name] = value
     return cls(**kwargs)
@@ -116,6 +152,7 @@ _NESTED = {
     "api": APIConfig,
     "storage": StorageConfig,
     "logging": LoggingConfig,
+    "flow": FlowConfig,
 }
 
 
@@ -135,6 +172,7 @@ def load_config(path: str | Path | None = None) -> Config:
     cfg = Config()
     if "mode" in raw:
         cfg.mode = str(raw["mode"])
+    cfg.topology_raw = raw.get("topology")
     for key, cls in _NESTED.items():
         if key in raw:
             setattr(cfg, key, _build(cls, raw[key]))

@@ -1,12 +1,25 @@
-# Network Traffic Controller
+# netpilot
 
 Yerel bir LLM ile çalışan ağ yönetim çekirdeği. Trafiği toplar, ölçer, tıkanmayı
 tespit eder, gerekçeli QoS politikaları üretir; AI analisti bu tabloyu okuyup
 özet, bulgu ve öneri çıkarır.
 
-**Faz 1 (bu sürüm):** trafik izleme + optimizasyon, kural motoru, AI analisti,
-canlı panel, simülasyon ortamı.
-**Sonraki fazlar:** akıllı firewall → honeypot/deception → endpoint agent'ları.
+> **Paket adı `ntc`, repo adı `netpilot`.** Kasıtlı: içeride onlarca `from ntc…`
+> import var, yeniden adlandırmak gereksiz kırılganlık.
+
+**Bu sürümde:**
+- Trafik toplama, metrikler (WAN ve LAN ayrı ölçülür)
+- Eşik tabanlı kural motoru — tıkanma tespiti, QoS politika taslakları
+- **Akış optimize edici** — çok mallı akış problemini doğrusal programla
+  çözer: hangi trafik hangi çıkıştan, kimden ne kadar geri çekilmeli
+- Yerel LLM analisti (Foundry Local / Ollama / kural tabanlı yedek)
+- Canlı panel, simülasyon ortamı, 6 tetiklenebilir senaryo
+
+**Sonraki:** infaz katmanı (üretilen planı gerçekten uygulamak) → akıllı
+firewall → honeypot/deception → endpoint agent'ları.
+
+> ⚠️ Üretilen politikalar şu an **uygulanmıyor**. Sistem ölçüyor, hesaplıyor ve
+> öneriyor; ağa dokunan bir modül henüz yok.
 
 ---
 
@@ -77,12 +90,12 @@ python -m ntc ask "en çok bandı kim yiyor?"
               ┌──────▼───────┐
               │   Metrics    │  kayan pencere: doluluk, sınıf/cihaz dağılımı
               └──────┬───────┘
-          ┌──────────┴──────────┐
-   ┌──────▼───────┐      ┌──────▼───────┐
-   │  Optimizer   │      │  AI Analyst  │  yerel LLM (Ollama)
-   │  (kurallar)  │      │  (bağlam)    │
-   └──────┬───────┘      └──────┬───────┘
-          └──────────┬──────────┘
+     ┌──────────────┼──────────────┐
+┌────▼─────┐  ┌─────▼──────┐  ┌────▼──────┐
+│Optimizer │  │  FlowOpt   │  │AI Analyst │  yerel LLM
+│(eşikler) │  │ (LP çözücü)│  │ (bağlam)  │  Foundry Local
+└────┬─────┘  └─────┬──────┘  └────┬──────┘
+     └──────────────┼──────────────┘
               ┌──────▼───────┐
               │  Controller  │  olay yolu + kalıcılık
               └──────┬───────┘
@@ -97,6 +110,14 @@ python -m ntc ask "en çok bandı kim yiyor?"
 politika `traffic/optimizer.py` içindeki ölçülebilir eşiklerden çıkar. Model
 çökse, yavaşlasa veya saçmalasa da sistem doğru çalışmaya devam eder. AI katmanı
 üstüne özet, bulgu ve öneri ekler.
+
+**Eşik denetimi ile optimizasyon ayrı işlerdir.** `optimizer.py` bir
+termostattır: doluluk eşiği aşınca politika taslağı üretir. `flowopt.py` ise
+gerçek bir optimizasyon yapar — talepleri topolojinin kenarlarına dağıtan çok
+mallı akış problemini doğrusal programla çözer ve "hangi trafik hangi çıkıştan,
+kimden ne kadar geri çekilmeli" sorusunu cevaplar. Sınıf öncelikleri katı
+uygulanır, ama her sınıfın kapasiteden bir asgari garantisi vardır — yoksa en
+düşük öncelikli sınıf (DNS, keepalive) tamamen aç kalıyordu.
 
 **AI önerileri otomatik uygulanmaz.** LLM'den gelen aksiyonlar `source="ai"`,
 `applied=False` olarak üretilir ve operatörün onayını bekler. Halüsinasyon ağa
@@ -153,7 +174,10 @@ curl -X POST http://127.0.0.1:8080/api/sim/scenario \
 | `GET /api/ai/report` · `POST /api/ai/analyze` | AI analizi |
 | `POST /api/ai/ask` | Serbest metin soru-cevap |
 | `GET /api/ai/snapshot` | Modele giden ham bağlam (şeffaflık/hata ayıklama) |
-| `POST /api/sim/scenario` | Senaryo tetikle |
+| `GET /api/flow/plan` | Son akış çözümü: tahsisler, geri çekmeler, darboğazlar |
+| `POST /api/flow/solve` | Beklemeden yeniden çöz |
+| `GET /api/flow/topology` | Topoloji grafiği (düğümler + kenarlar) |
+| `POST /api/sim/scenario` · `DELETE /api/sim/scenarios` | Senaryo tetikle / temizle |
 | `WS /ws` | Canlı metrik / uyarı / aksiyon / rapor akışı |
 
 ---
@@ -171,7 +195,10 @@ NTC_AI__MODEL=llama3.2  NTC_API__PORT=9000  python -m ntc serve
 
 ## Yol haritası
 
-- [x] **Faz 1 — Trafik izleme + optimizasyon** (bu sürüm)
+- [x] **Faz 1 — Trafik izleme + kural motoru**
+- [x] **Akış optimizasyonu** — topoloji modeli + çok mallı akış çözücüsü
+- [ ] **İnfaz katmanı** — üretilen planı gerçekten uygulamak
+      (`Set-NetQosPolicy`, önce gölge modda)
 - [ ] **Faz 2 — Canlı mod:** scapy ile gerçek arayüz yakalama; `LiveSource`
       simülatörün yerine aynı arayüzden geçer
 - [ ] **Faz 3 — Akıllı firewall:** kural motoru + LLM'in trafik bağlamına bakıp

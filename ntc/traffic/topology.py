@@ -4,13 +4,14 @@ Faz 1'de topoloji yoktu: tek bir WAN hattı vardı ve cihazlar doğrudan ona
 bağlıydı. Bu yüzden "optimizasyon" yapılabilecek bir şey de yoktu — tek yol
 varken seçilecek yol yok, sadece kısıtlanacak hız var.
 
-Burada ağı yönlü bir grafik olarak modelliyoruz:
+Burada ağı yönlü bir grafik olarak modelliyoruz. Varsayılan hali
+`config.yaml` içindeki `link:` ile birebir — tek çıkış:
 
-    cihazlar ──► erişim anahtarı ──► çekirdek ──┬─► wan-fiber ──┐
-                                                ├─► wan-lte    ─┼─► internet
-                                                └─► wan-yedek  ─┘
-                                                │
-                                                └─► nvr / dosya sunucusu  (LAN)
+    cihazlar ──► sw-access ──► sw-core ──┬─► wan ──► internet
+                                         └─► nvr / srv-file   (LAN, WAN'a çıkmaz)
+
+Çoklu çıkış (yedek hat, LTE) `topology:` bloğuyla tanımlanır; varsayılanda
+**yok**, çünkü olmayan kapasiteyi varsaymak çözücüyü yanıltıyor.
 
 Her kenarın kapasitesi, gecikmesi, maliyeti ve sağlığı var. Optimize edici
 bunları kısıt olarak alıp trafiği kenarlara dağıtıyor.
@@ -22,7 +23,7 @@ yüzden grafik yönlü ve her fiziksel hat iki kenar olarak duruyor.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Iterable
+from typing import Any
 
 INTERNET = "internet"
 
@@ -87,17 +88,11 @@ class Topology:
     def out_edges(self, node: str) -> list[Edge]:
         return [e for e in self.edges if e.src == node]
 
-    def in_edges(self, node: str) -> list[Edge]:
-        return [e for e in self.edges if e.dst == node]
-
     def edge(self, src: str, dst: str) -> Edge | None:
         for e in self.edges:
             if e.src == src and e.dst == dst:
                 return e
         return None
-
-    def wan_edges(self) -> list[Edge]:
-        return [e for e in self.edges if e.kind == "wan"]
 
     def has_node(self, node: str) -> bool:
         return any(e.src == node or e.dst == node for e in self.edges)
@@ -159,49 +154,43 @@ class Topology:
     @classmethod
     def default(cls, downlink_mbps: float = 200.0,
                 uplink_mbps: float = 20.0) -> "Topology":
-        """Tek fiberli, iki yedek çıkışlı ofis ağı.
+        """`link:` ayarındaki **tek** hattı modelleyen topoloji.
 
-        Kapasiteler `link:` ayarındaki hat ile uyumlu tutuluyor ki mevcut
-        eşik mantığıyla aynı dünyayı anlatsınlar.
+        ⚠️ Burada birden çok WAN çıkışı uydurmuyoruz. İlk sürüm üç çıkış
+        (fiber + yedek + LTE) kuruyordu ve sonuç yanlıştı: gerçek hat %92
+        doluyken çözücü "darboğaz yok" diyordu, çünkü var olmayan 150 Mbps'lik
+        ek kapasiteyi kullanılabilir sanıyordu. Panel ile ölçüm birbirini
+        yalanlıyordu.
+
+        Kural: **varsayılan topoloji yapılandırmadaki kapasiteyi aşmaz.**
+        Çoklu çıkış gerçek bir yetenek, ama var olduğunu kullanıcı söyler —
+        `config.yaml` içindeki `topology:` bloğuyla.
         """
-        e = []
+        e = [
+            # Erişim katmanı: cihazların girdiği yer, iç anahtarlama bol.
+            Edge("sw-access", "sw-core", 1000.0, 0.2, kind="access"),
+            Edge("sw-core", "sw-access", 1000.0, 0.2, kind="access"),
 
-        # Erişim katmanı — cihazların girdiği yer. İç anahtarlama bol.
-        e.append(Edge("sw-access", "sw-core", 1000.0, 0.2, kind="access"))
-        e.append(Edge("sw-core", "sw-access", 1000.0, 0.2, kind="access"))
+            # LAN hedefleri — kamera kaydı ve dosya sunucusu. WAN'a çıkmıyor,
+            # o yüzden internet hattı doluluğuna da sayılmıyor (3. ilke).
+            Edge("sw-core", "nvr", 1000.0, 0.3, kind="lan"),
+            Edge("nvr", "sw-core", 1000.0, 0.3, kind="lan"),
+            Edge("sw-core", "srv-file", 1000.0, 0.3, kind="lan"),
+            Edge("srv-file", "sw-core", 1000.0, 0.3, kind="lan"),
 
-        # LAN hedefleri: kamera kaydı ve dosya sunucusu. Bunlar WAN'a çıkmıyor.
-        e.append(Edge("sw-core", "nvr", 1000.0, 0.3, kind="lan"))
-        e.append(Edge("sw-core", "srv-file", 1000.0, 0.3, kind="lan"))
-
-        # WAN çıkışları. Üçü de internete gidiyor; optimize edici hangisinden
-        # ne kadar akıtacağına karar veriyor.
-        e.append(Edge("sw-core", "wan-fiber", downlink_mbps, 8.0, kind="wan"))
-        e.append(Edge("wan-fiber", INTERNET, downlink_mbps, 8.0, kind="wan"))
-        e.append(Edge("sw-core", "wan-lte", 50.0, 45.0,
-                      cost_per_gb=4.0, kind="wan"))
-        e.append(Edge("wan-lte", INTERNET, 50.0, 45.0,
-                      cost_per_gb=4.0, kind="wan"))
-        e.append(Edge("sw-core", "wan-yedek", 100.0, 14.0, kind="wan"))
-        e.append(Edge("wan-yedek", INTERNET, 100.0, 14.0, kind="wan"))
-
-        # Yükleme yönü — ayrı ve çok daha dar. Asimetri gerçek hatların
-        # belirleyici özelliği; simetrik modellemek yanlış sonuç verir.
-        e.append(Edge(INTERNET, "wan-fiber", uplink_mbps, 8.0, kind="wan"))
-        e.append(Edge("wan-fiber", "sw-core", uplink_mbps, 8.0, kind="wan"))
-        e.append(Edge(INTERNET, "wan-lte", 10.0, 45.0,
-                      cost_per_gb=4.0, kind="wan"))
-        e.append(Edge("wan-lte", "sw-core", 10.0, 45.0,
-                      cost_per_gb=4.0, kind="wan"))
-        e.append(Edge(INTERNET, "wan-yedek", 5.0, 14.0, kind="wan"))
-        e.append(Edge("wan-yedek", "sw-core", 5.0, 14.0, kind="wan"))
-
-        e.append(Edge("nvr", "sw-core", 1000.0, 0.3, kind="lan"))
-        e.append(Edge("srv-file", "sw-core", 1000.0, 0.3, kind="lan"))
-
+            # Tek WAN çıkışı. İndirme ve yükleme ayrı kenar: asimetri
+            # (200/20) gerçek hatların belirleyici özelliği.
+            #
+            # ⚠️ Yön fiziksel olarak doğru olmak zorunda. İlk sürümde tersti:
+            # indirme kapasitesi `cihaz → internet` kenarlarına konmuştu.
+            # Tek yön modellendiği sürece fark etmiyordu ama yükleme talebi
+            # eklenince yükleme, indirme kapasitesini tüketmeye başlıyordu.
+            #
+            # YÜKLEME: veri cihazdan çıkar → sw-core → wan → internet
+            Edge("sw-core", "wan", uplink_mbps, 8.0, kind="wan"),
+            Edge("wan", INTERNET, uplink_mbps, 8.0, kind="wan"),
+            # İNDİRME: veri internetten gelir → wan → sw-core → cihaz
+            Edge(INTERNET, "wan", downlink_mbps, 8.0, kind="wan"),
+            Edge("wan", "sw-core", downlink_mbps, 8.0, kind="wan"),
+        ]
         return cls(edges=e)
-
-
-def summarize_edges(edges: Iterable[Edge]) -> str:
-    """Log ve panel için tek satırlık özet."""
-    return ", ".join(f"{e.src}->{e.dst} {e.effective_mbps:.0f}M" for e in edges)

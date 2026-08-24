@@ -9,12 +9,10 @@ from __future__ import annotations
 
 import ipaddress
 import random
-import time
 from dataclasses import dataclass, field
 
 from ..core.models import (
     Device,
-    DeviceKind,
     Direction,
     Flow,
     TrafficClass,

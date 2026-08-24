@@ -14,6 +14,29 @@ collector:
   tick_seconds: 1.0       # simülatörün kaç saniyede bir akış üreteceği
   window_seconds: 60      # metrik penceresi
 
+# Akış optimize edici (ntc/traffic/flowopt.py)
+flow:
+  enabled: true
+  interval_seconds: 15      # LP çözümü; eşik döngüsünden seyrek koşuyor
+  min_pullback_mbps: 0.5    # bunun altındaki eksik "geri çek" sayılmıyor
+
+# Topoloji — yazılmazsa `link:` kapasitelerinden tek çıkışlı varsayılan kurulur.
+# Birden çok WAN çıkışın varsa buradan tanımla; çözücü trafiği aralarında
+# bölebilir, sayaçlı olanı en son kullanır, bozulanından kaçınır.
+#
+# topology:
+#   default_access: sw-access
+#   edges:
+#     - {src: sw-access, dst: sw-core,  capacity_mbps: 1000, kind: access}
+#     - {src: sw-core,   dst: sw-access, capacity_mbps: 1000, kind: access}
+#     - {src: sw-core,   dst: nvr,      capacity_mbps: 1000, kind: lan}
+#     - {src: nvr,       dst: sw-core,  capacity_mbps: 1000, kind: lan}
+#     - {src: sw-core,   dst: fiber,    capacity_mbps: 200, latency_ms: 8,  kind: wan}
+#     - {src: fiber,     dst: internet, capacity_mbps: 200, latency_ms: 8,  kind: wan}
+#     - {src: sw-core,   dst: lte,      capacity_mbps: 50,  latency_ms: 45, cost_per_gb: 4, kind: wan}
+#     - {src: lte,       dst: internet, capacity_mbps: 50,  latency_ms: 45, cost_per_gb: 4, kind: wan}
+#     # health: 0.0-1.0 — bozulan hattı silmek yerine daraltmak için
+
 optimizer:
   enabled: true
   interval_seconds: 5

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import logging
 from pathlib import Path
@@ -104,6 +103,31 @@ def create_app(cfg: Config | None = None) -> FastAPI:
     async def notable_flows(limit: int = Query(100, ge=1, le=1000),
                             device_id: str | None = None):
         return await controller.storage.recent_notable_flows(limit, device_id)
+
+    @app.get("/api/flow/plan")
+    async def flow_plan():
+        """Son akış çözümü: kime ne kadar, hangi kenardan, kimden ne kadar geri."""
+        if controller.flow_plan is None:
+            return {"solved": False,
+                    "note": "henüz çözüm yok — ilk döngü bekleniyor"}
+        return controller.flow_plan.to_dict()
+
+    @app.post("/api/flow/solve")
+    async def flow_solve():
+        """Beklemeden yeniden çöz. Panelden 'şimdi hesapla' için."""
+        plan = await controller.run_flow_optimization()
+        if plan is None:
+            return {"solved": False, "note": "ölçülecek trafik yok"}
+        return plan.to_dict()
+
+    @app.get("/api/flow/history")
+    async def flow_history(limit: int = Query(50, ge=1, le=500)):
+        """Geçmiş akış kararları — "dün kimden ne kadar kısıldı" için."""
+        return await controller.storage.recent_flow_plans(limit)
+
+    @app.get("/api/flow/topology")
+    async def flow_topology():
+        return controller.topology.to_dict()
 
     @app.get("/api/alerts")
     async def alerts(limit: int = Query(50, ge=1, le=500), persisted: bool = False):
@@ -218,7 +242,9 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         except WebSocketDisconnect:
             pass
         except Exception:
-            pass
+            # Sessizce yutmak, panelin neden veri almadığını görünmez
+            # kılıyordu. Bağlantı yine kapanıyor ama sebebi log'a düşüyor.
+            log.exception("WebSocket oturumu hatayla kapandı")
         finally:
             hub.leave(ws)
 

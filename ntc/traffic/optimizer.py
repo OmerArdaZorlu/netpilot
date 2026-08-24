@@ -87,7 +87,12 @@ class TrafficOptimizer:
 
     def _check_downlink(self, stats: LinkStats) -> list[OptimizationAction]:
         util = stats.down_utilization
-        if util < self.cfg.hog_share_threshold and util < self.link.congestion_threshold:
+        # Eskiden burada `util < hog_share_threshold` da vardı; o eşik **tek
+        # cihazın toplam banttaki payı** için, hat doluluğu için değil. İki
+        # farklı büyüklüğü kıyaslıyordu. Bugünkü değerlerle (0.35 < 0.80)
+        # sonucu değiştirmiyordu ama hog eşiği tıkanma eşiğinin üstüne
+        # çekilseydi kural sessizce yanlış çalışacaktı.
+        if util < self.link.congestion_threshold:
             return []
 
         if util >= self.link.critical_threshold:

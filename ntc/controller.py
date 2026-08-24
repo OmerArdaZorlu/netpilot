@@ -19,10 +19,12 @@ from .core.bus import (
     EventBus,
 )
 from .core.config import Config
-from .core.models import Alert, OptimizationAction, now
+from .core.models import Alert, OptimizationAction, new_id, now
 from .storage.db import Storage
 from .traffic.metrics import MetricsEngine
+from .traffic.flowopt import FlowOptimizer, FlowPlan, demands_from_signals
 from .traffic.optimizer import TrafficOptimizer
+from .traffic.topology import Topology
 from .traffic.simulator import TrafficSimulator
 
 log = logging.getLogger(__name__)
@@ -35,6 +37,12 @@ class Controller:
         self.simulator = TrafficSimulator()
         self.metrics = MetricsEngine(cfg.link, cfg.collector.window_seconds)
         self.optimizer = TrafficOptimizer(cfg.optimizer, cfg.link)
+        # Akış optimize edici — eşik denetçisinden ayrı bir iş yapıyor:
+        # eşik "hat doldu" der, bu "trafiği nasıl dağıtalım" hesaplar.
+        self.topology = Topology.from_config(cfg.topology_raw)             if cfg.topology_raw else Topology.default(
+                cfg.link.downlink_mbps, cfg.link.uplink_mbps)
+        self.flow_optimizer = FlowOptimizer(self.topology)
+        self.flow_plan: FlowPlan | None = None
         self.storage = Storage(cfg.storage.resolved_path(), cfg.storage.retain_hours)
 
         self.provider: LLMProvider | None = None
@@ -64,6 +72,7 @@ class Controller:
             asyncio.create_task(self._collect_loop(), name="collect"),
             asyncio.create_task(self._optimize_loop(), name="optimize"),
             asyncio.create_task(self._ai_loop(), name="ai"),
+            asyncio.create_task(self._flow_loop(), name="flow"),
             asyncio.create_task(self._prune_loop(), name="prune"),
         ]
         log.info("Controller başladı (mod=%s, ai=%s/%s)",
@@ -128,6 +137,49 @@ class Controller:
             except Exception:
                 log.exception("AI döngüsünde hata")
             await asyncio.sleep(interval)
+
+    async def _flow_loop(self) -> None:
+        """Ölçülen talepleri topolojiye oturtup en iyi dağıtımı hesaplar.
+
+        Eşik döngüsünden ayrı ve daha seyrek çalışıyor. Sonucu bir *hedef
+        durum*: kim ne kadar alabilir, hangi kenardan, kimden ne kadar geri
+        çekilmeli. Uygulayan yok — 5. mimari ilke, önce gölge modda.
+        """
+        interval = self.cfg.flow.interval_seconds
+        await asyncio.sleep(min(interval, self.cfg.collector.window_seconds / 4))
+        while self._running:
+            if self.cfg.flow.enabled:
+                try:
+                    await self.run_flow_optimization()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    log.exception("Akış optimizasyon döngüsünde hata")
+            await asyncio.sleep(interval)
+
+    async def run_flow_optimization(self) -> FlowPlan | None:
+        """Tek seferlik akış çözümü. CLI ve API buradan çağırıyor."""
+        signals = self.metrics.device_signals()
+        if not signals:
+            return None
+        demands = demands_from_signals(signals, self.simulator.devices,
+                                       self.topology)
+        if not demands:
+            return None
+
+        # LP saf CPU işi; olay döngüsünü kilitlememesi için ayrı iş parçacığında.
+        plan = await asyncio.to_thread(self.flow_optimizer.solve, demands)
+        self.flow_plan = plan
+        await self.storage.save_flow_plan(new_id("flw"), now(), plan)
+
+        pulls = plan.pullbacks(self.cfg.flow.min_pullback_mbps)
+        if pulls:
+            top = pulls[0]
+            log.info("Akış planı: %d cihazdan geri çekme, en büyüğü %s "
+                     "(%.1f Mbps); darboğaz: %s",
+                     len(pulls), top["device"], top["pullback_mbps"],
+                     ", ".join(b["edge"] for b in plan.bottlenecks()) or "yok")
+        return plan
 
     async def _prune_loop(self) -> None:
         while self._running:
@@ -200,6 +252,22 @@ class Controller:
                 "model": self.provider.model if self.provider else None,
                 "last_analysis_ts": last.ts if last else None,
                 "health_score": last.health_score if last else None,
+            },
+            "flow": {
+                "enabled": self.cfg.flow.enabled,
+                "solved": self.flow_plan is not None,
+                # Özet; tam plan /api/flow ucunda. Panel her saniye status
+                # çekiyor, kenar kenar döküm oraya sığmaz.
+                "total_demand_mbps": round(sum(
+                    a.demand.mbps for a in self.flow_plan.allocations), 2)
+                    if self.flow_plan else None,
+                "total_granted_mbps": round(sum(
+                    a.granted_mbps for a in self.flow_plan.allocations), 2)
+                    if self.flow_plan else None,
+                "pullback_count": len(self.flow_plan.pullbacks(
+                    self.cfg.flow.min_pullback_mbps)) if self.flow_plan else 0,
+                "bottlenecks": [b["edge"] for b in self.flow_plan.bottlenecks()]
+                    if self.flow_plan else [],
             },
             "link": {
                 "down_mbps": round(stats.down_bps / 1e6, 2),

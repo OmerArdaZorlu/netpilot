@@ -48,6 +48,42 @@ class LLMProvider(ABC):
         return None
 
 
+def _scan_object(text: str) -> dict[str, Any] | None:
+    """Metindeki ilk dengeli JSON nesnesini söker; yoksa None.
+
+    Dize içindeki süslü parantezleri saymamak için kaçış ve tırnak durumunu
+    izliyor — aksi halde `{"reason": "a { b"}` gibi bir yanıt dengesiz görünür.
+    """
+    start = text.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    for idx in range(start, len(text)):
+        ch = text[idx]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(text[start:idx + 1])
+                except json.JSONDecodeError:
+                    return None
+    return None
+
+
 def extract_json(raw: str) -> dict[str, Any]:
     """Metnin içinden ilk geçerli JSON nesnesini söker.
 
@@ -58,14 +94,30 @@ def extract_json(raw: str) -> dict[str, Any]:
     if not text:
         raise ValueError("model boş yanıt döndürdü")
 
-    fence = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
-    if fence:
-        text = fence.group(1).strip()
+    # Kod bloklarını sırayla dene. Tek blok yakalayıp `text`'in üstüne yazmak
+    # üretimde kırıldı: model bozuk bir blok açıp (```ple ...) ardından doğru
+    # ```json bloğunu verdiğinde, ilk eşleşme araya giren düzyazıyı yakalıyor
+    # ve gerçek JSON tamamen kayboluyordu. Adaylar denenir, hiçbiri tutmazsa
+    # **ham metne** dönülür — arama alanı asla daraltılmaz.
+    for block in re.findall(r"```(?:json)?\s*(.*?)```", text, re.DOTALL):
+        candidate = block.strip()
+        if not candidate:
+            continue
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            parsed = _scan_object(candidate)
+        if isinstance(parsed, dict):
+            return parsed
 
     try:
         return json.loads(text)
     except json.JSONDecodeError:
         pass
+
+    found = _scan_object(text)
+    if found is not None:
+        return found
 
     start = text.find("{")
     if start == -1:

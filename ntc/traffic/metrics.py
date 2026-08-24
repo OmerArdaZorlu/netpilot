@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Iterable
 
 from ..core.config import LinkConfig
-from ..core.models import Direction, Flow, LinkStats, TrafficClass, now
+from ..core.models import Direction, Flow, LinkStats, now
 
 
 @dataclass
