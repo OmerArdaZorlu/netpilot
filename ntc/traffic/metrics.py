@@ -30,7 +30,15 @@ class DeviceSignals:
     avg_rtt_ms: float = 0.0
     retransmit_rate: float = 0.0
     top_app: str = ""
+    # WAN trafiğinin sınıf dağılımı (iki yön birlikte). Geriye dönük uyum ve
+    # "bu cihaz genel olarak ne yapıyor" özeti için duruyor.
     class_mix: dict[str, float] = field(default_factory=dict)
+    # Yön başına dağılım. Tek bir karışım kullanmak akış çözücüsünde yanlış
+    # sonuç veriyordu: yedekleme yüklemede baskındır, indirmede değil. Aynı
+    # oranla bölmek yükleme tarafındaki sınıf önceliğini bozuyor.
+    class_mix_down: dict[str, float] = field(default_factory=dict)
+    class_mix_up: dict[str, float] = field(default_factory=dict)
+    class_mix_lan: dict[str, float] = field(default_factory=dict)
 
     @property
     def total_bps(self) -> float:
@@ -142,13 +150,27 @@ class MetricsEngine:
             packets = sum(f.packets for f in dev_flows)
             app_bytes: dict[str, int] = defaultdict(int)
             class_bits: dict[str, float] = defaultdict(float)
+            down_bits: dict[str, float] = defaultdict(float)
+            up_bits: dict[str, float] = defaultdict(float)
+            lan_bits: dict[str, float] = defaultdict(float)
             # Sınıf karışımı WAN üzerinden — QoS kararları yalnızca hattı
-            # tüketen trafiğe uygulanır.
+            # tüketen trafiğe uygulanır. Yön başına ayrı sayılıyor.
             for f in wan_flows:
-                class_bits[f.traffic_class.value] += f.total_bytes * 8
+                cls = f.traffic_class.value
+                class_bits[cls] += f.total_bytes * 8
+                down_bits[cls] += f.bytes_down * 8
+                up_bits[cls] += f.bytes_up * 8
             for f in dev_flows:
                 app_bytes[f.app] += f.total_bytes
+                if f.direction is Direction.LATERAL:
+                    lan_bits[f.traffic_class.value] += f.total_bytes * 8
             total_bits = sum(class_bits.values()) or 1.0
+
+            def _mix(bits: dict[str, float]) -> dict[str, float]:
+                toplam = sum(bits.values())
+                if toplam <= 0:
+                    return {}
+                return {k: round(v / toplam, 3) for k, v in bits.items()}
 
             out[device_id] = DeviceSignals(
                 device_id=device_id,
@@ -169,6 +191,9 @@ class MetricsEngine:
                 ) if packets else 0.0,
                 top_app=max(app_bytes, key=app_bytes.get) if app_bytes else "",
                 class_mix={k: round(v / total_bits, 3) for k, v in class_bits.items()},
+                class_mix_down=_mix(down_bits),
+                class_mix_up=_mix(up_bits),
+                class_mix_lan=_mix(lan_bits),
             )
         return out
 

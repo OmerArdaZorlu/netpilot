@@ -68,7 +68,7 @@ CREATE TABLE IF NOT EXISTS notable_flows (
     id TEXT PRIMARY KEY, ts REAL, device_id TEXT, src_ip TEXT, dst_ip TEXT,
     src_port INTEGER, dst_port INTEGER, proto TEXT, app TEXT,
     traffic_class TEXT, direction TEXT, bytes_down INTEGER, bytes_up INTEGER,
-    packets INTEGER, rtt_ms REAL, flags TEXT
+    packets INTEGER, rtt_ms REAL, flags TEXT, egress TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_flows_ts ON notable_flows(ts DESC);
 CREATE INDEX IF NOT EXISTS idx_flows_device ON notable_flows(device_id, ts DESC);
@@ -203,11 +203,13 @@ class Storage:
         rows = [
             (f.id, f.ts, f.device_id, f.src_ip, f.dst_ip, f.src_port, f.dst_port,
              f.proto, f.app, f.traffic_class.value, f.direction.value,
-             f.bytes_down, f.bytes_up, f.packets, f.rtt_ms, json.dumps(f.flags))
+             f.bytes_down, f.bytes_up, f.packets, f.rtt_ms, json.dumps(f.flags),
+             f.egress)
             for f in flows if is_notable(f)
         ]
         await self._write(
-            "INSERT OR REPLACE INTO notable_flows VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT OR REPLACE INTO notable_flows VALUES "
+            "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             rows,
         )
 

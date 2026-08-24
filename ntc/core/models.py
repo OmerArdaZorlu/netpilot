@@ -118,6 +118,11 @@ class Flow:
     rtt_ms: float = 0.0
     retransmits: int = 0
     flags: list[str] = field(default_factory=list)
+    # Akış çözücüsünün bu akışa atadığı çıkış düğümü. Boşsa henüz plan yok
+    # ya da tek yol var. **Akış başına** atanır ve akış boyunca değişmez —
+    # paketleri iki yola serpiştirmek TCP'yi yavaşlatır (sırasız gelen paket
+    # kayıp sanılır, tıkanma penceresi çöker).
+    egress: str = ""
 
     @property
     def total_bytes(self) -> int:
@@ -158,6 +163,7 @@ class ActionKind(str, Enum):
     DEPRIORITIZE = "deprioritize"      # QoS önceliğini düşür
     DEFER = "defer"                    # yoğunluk bitene kadar ertele
     REBALANCE = "rebalance"            # sınıflar arası bant payı yeniden dağıt
+    REROUTE = "reroute"                # trafiği başka bir çıkıştan akıt
     ADVISE = "advise"                  # sadece öneri, uygulanabilir kural yok
 
 

@@ -67,21 +67,34 @@ class TrafficOptimizer:
         stats = metrics.link_stats()
         signals = metrics.device_signals()
 
-        actions: list[OptimizationAction] = []
-        alerts: list[Alert] = []
-
-        actions += self._check_downlink(stats)
-        actions += self._check_uplink(stats, signals, devices)
-        actions += self._check_hogs(stats, signals, devices)
-        actions += self._check_quality(stats, signals, devices)
-
-        alerts += self._alerts_for(stats, signals, devices)
-
+        alerts = self._alerts_for(stats, signals, devices)
         released = self._release_stale(stats)
-        recorded = [a for a in actions if self._record(a)]
 
-        return OptimizerResult(actions=recorded, alerts=alerts,
+        # ⚠️ Aksiyon üretmiyoruz — bilinçli.
+        #
+        # Eskiden bu kurallar da `rate_limit` üretiyordu ve sayıları akış
+        # çözücüsüyle çelişiyordu: burası "ws-dev-02'yi 70 Mbps'e sınırla"
+        # derken çözücü "8.8 Mbps verilebilir" diyordu. İkisi de aynı listeye
+        # düşüyor, operatör hangisinin doğru olduğunu bilmiyordu.
+        #
+        # İş bölümü artık net: **eşik motoru durumu tespit eder ve uyarır,
+        # sayıyı çözücü verir.** Buradaki eşikler hâlâ değerli — "hat doldu",
+        # "şu cihaz tekelci", "kalite bozuldu" gözlemleri deterministik ve
+        # modelden bağımsız. Ama "ne kadar" sorusunun cevabı hesaptan çıkmalı,
+        # uydurma bir orandan değil.
+        #
+        # Politika defteri (TTL, tekrar bastırma, uygula/kaldır) burada
+        # kalıyor; çözücünün aksiyonları `adopt()` ile aynı defterden geçiyor.
+        return OptimizerResult(actions=[], alerts=alerts,
                                stats=stats, released=released)
+
+    def adopt(self, actions: list[OptimizationAction]) -> list[OptimizationAction]:
+        """Dışarıdan gelen aksiyonları politika defterine alır.
+
+        Akış çözücüsünün ürettiği aksiyonlar buradan geçiyor ki TTL, tekrar
+        bastırma ve uygula/kaldır davranışı tek yerde kalsın.
+        """
+        return [a for a in actions if self._record(a)]
 
     # ----------------------------------------------------------------- kurallar
 

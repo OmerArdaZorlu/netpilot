@@ -19,10 +19,22 @@ from .core.bus import (
     EventBus,
 )
 from .core.config import Config
-from .core.models import Alert, OptimizationAction, new_id, now
+from .core.models import (
+    Alert,
+    Direction,
+    OptimizationAction,
+    new_id,
+    now,
+)
 from .storage.db import Storage
 from .traffic.metrics import MetricsEngine
-from .traffic.flowopt import FlowOptimizer, FlowPlan, demands_from_signals
+from .traffic.flowopt import (
+    FlowOptimizer,
+    FlowPlan,
+    PathAssigner,
+    actions_from_plan,
+    demands_from_signals,
+)
 from .traffic.optimizer import TrafficOptimizer
 from .traffic.topology import Topology
 from .traffic.simulator import TrafficSimulator
@@ -43,6 +55,8 @@ class Controller:
                 cfg.link.downlink_mbps, cfg.link.uplink_mbps)
         self.flow_optimizer = FlowOptimizer(self.topology)
         self.flow_plan: FlowPlan | None = None
+        # Akışları planın oranlarına göre çıkışlara dağıtır.
+        self.path_assigner = PathAssigner()
         self.storage = Storage(cfg.storage.resolved_path(), cfg.storage.retain_hours)
 
         self.provider: LLMProvider | None = None
@@ -96,6 +110,7 @@ class Controller:
         while self._running:
             try:
                 flows = self.simulator.tick(dt)
+                self._stamp_paths(flows)
                 self.metrics.add(flows)
                 stats = self.metrics.link_stats()
                 self.metrics.sample_history(stats)
@@ -117,8 +132,9 @@ class Controller:
             if not self.cfg.optimizer.enabled:
                 continue
             try:
+                # Eşik motoru yalnız uyarır; "ne kadar" kararını akış
+                # çözücüsü veriyor (bkz. optimizer.evaluate yorumu).
                 result = self.optimizer.evaluate(self.metrics, self.simulator.devices)
-                await self._emit_actions(result.actions)
                 await self._emit_alerts(result.alerts)
             except asyncio.CancelledError:
                 raise
@@ -170,7 +186,15 @@ class Controller:
         # LP saf CPU işi; olay döngüsünü kilitlememesi için ayrı iş parçacığında.
         plan = await asyncio.to_thread(self.flow_optimizer.solve, demands)
         self.flow_plan = plan
+        self.path_assigner.update(plan)
         await self.storage.save_flow_plan(new_id("flw"), now(), plan)
+
+        # Çözücünün kararlarını aksiyona çevirip politika defterine al.
+        actions = actions_from_plan(plan, self.simulator.devices,
+                                    self.cfg.flow.min_pullback_mbps)
+        recorded = self.optimizer.adopt(actions)
+        if recorded:
+            await self._emit_actions(recorded)
 
         pulls = plan.pullbacks(self.cfg.flow.min_pullback_mbps)
         if pulls:
@@ -180,6 +204,24 @@ class Controller:
                      len(pulls), top["device"], top["pullback_mbps"],
                      ", ".join(b["edge"] for b in plan.bottlenecks()) or "yok")
         return plan
+
+    def _stamp_paths(self, flows: list) -> None:
+        """Yeni akışlara çıkış düğümü damgalar.
+
+        Yön akışın kendi yönünden geliyor; hangi cihaz, hangi sınıf olduğu da
+        akışta var. Atama akış anahtarının hash'i ile yapıldığı için aynı akış
+        her tick'te aynı çıkışa düşüyor — yol ortada değişmiyor.
+        """
+        if not self.flow_plan:
+            return
+        for f in flows:
+            direction = "lan" if f.direction is Direction.LATERAL else (
+                "down" if f.bytes_down >= f.bytes_up else "up")
+            device = self.simulator.devices.get(f.device_id)
+            host = getattr(device, "hostname", None) or f.device_id
+            key = f"{f.src_ip}:{f.src_port}->{f.dst_ip}:{f.dst_port}/{f.proto}"
+            f.egress = self.path_assigner.assign(
+                host, f.traffic_class.value, direction, key)
 
     async def _prune_loop(self) -> None:
         while self._running:
@@ -198,18 +240,21 @@ class Controller:
     async def run_analysis(self) -> AIReport | None:
         if self.analyst is None:
             return None
+        # Analist artık tespit etmiyor, açıklıyor: kural motorunun uyarıları
+        # ve çözücünün kararı ona olgu olarak veriliyor.
         report = await self.analyst.analyze(
-            self.metrics, self.simulator.devices, self.optimizer)
+            self.metrics, self.simulator.devices, self.optimizer,
+            alerts=list(self.alerts)[:10], flow_plan=self.flow_plan)
         self.reports.appendleft(report)
         await self.storage.save_report(report)
         await self.bus.publish(TOPIC_AI_REPORT, report)
 
         if report.actions:
             await self._emit_actions(report.actions)
-        # AI bulguları da aynı soğuma defterinden geçer — analist her 30 sn'de bir
-        # aynı tıkanmayı yeniden bildirir, akış bundan kirlenmesin.
-        await self._emit_alerts(
-            self.optimizer.debounce(AIAnalyst.report_alerts(report)))
+        # ⚠️ AI bulguları artık uyarıya çevrilmiyor. Analist yeni sorun
+        # tespit etmiyor; açıkladığı uyarılar zaten kural motoru tarafından
+        # yayınlanmış oluyor. Tekrar yayınlamak aynı olayı iki kez göstermek
+        # olurdu.
         return report
 
     async def ask(self, question: str) -> dict[str, Any]:

@@ -874,35 +874,89 @@ doygunluğu, LAN'ın WAN'ı tüketmemesi).
 çekmeler, darboğazlar — "geçen hafta hangi cihaz en çok kısıldı" sorusunu
 cevaplayan alanlar. Tam kenar dökümü saklanmıyor (pahalı ve sorulmuyor).
 
+### ✅ Dört açık borç kapatıldı (2026-08-24)
+
+**1. Eşik motoru ile çözücünün çelişkisi.** İkisi de aynı cihaz için hız
+kararı üretiyordu, farklı sayılarla: `optimizer.py` "ws-dev-02'yi 70 Mbps'e
+sınırla" derken çözücü "8.8 Mbps verilebilir" diyordu. Biri eşikten uydurma,
+diğeri hesaplanmış; operatör hangisine bakacağını bilmiyordu.
+
+> **İş bölümü artık net: eşik motoru durumu tespit eder ve uyarır, sayıyı
+> çözücü verir.** `optimizer.evaluate()` yalnız uyarı döndürüyor;
+> `flowopt.actions_from_plan()` aksiyonları üretiyor ve `optimizer.adopt()`
+> ile aynı politika defterinden geçiyor (TTL, tekrar bastırma, uygula/kaldır
+> tek yerde kalsın).
+
+Yeni `ActionKind.REROUTE` eklendi — çözücü zaten yol bölmesi hesaplıyordu,
+karşılığı yoktu.
+
+⚠️ İlk sürümde `reroute` tespiti yanlıştı: yol üzerindeki **ardışık durakları**
+(sw-core → wan → internet) paralel çıkış sanıp tek yollu topolojide bile
+"bölündü" diyordu. Doğrusu: gerçek bölünme = tek bir düğümden birden çok
+kenara akış çıkması.
+
+**2. `Flow`'a yol alanı.** `Flow.egress` eklendi, `PathAssigner` ile
+dolduruluyor.
+
+> **Akış başına atama, paket başına değil.** Tek akışın paketlerini farklı
+> gecikmeli iki yola serpiştirmek TCP'yi yavaşlatıyor: sırasız gelen paket
+> kayıp sanılıyor, tıkanma penceresi çöküyor. Atama `blake2b` hash'i ile
+> deterministik — aynı akış hep aynı çıkışa düşüyor, yani yapışkanlık bedava
+> geliyor ve akış ortasında yol değişmiyor. Dağılım planın oranını tutuyor
+> (ölçüldü: 60/40 planına karşı %60.2/%39.8).
+
+**3. `class_mix` yön ayrımı.** `class_mix_down` / `_up` / `_lan` eklendi.
+Tek karışım kullanmak iki yönde de yanlıştı: ölçümde genel karışım %50 toplu
+%50 yayın derken indirme gerçekte %90 yayın, yükleme %90 toplu çıktı.
+
+**4. AI'ın rolü — tespit değil açıklama.** İstem yeniden yazıldı: modele
+snapshot + kural motorunun uyarıları + çözücünün kararı veriliyor, ondan
+**açıklama** isteniyor.
+
+| Ne | Önce | Sonra |
+|---|---|---|
+| Önem derecesi | model veriyordu (`0.175 doluluk → critical`) | koddan, kaynağındaki olgudan |
+| Öneri türü | `rate_limit` vb. sayılı aksiyon | her zaman `advise`, sayısız |
+| AI aksiyonu | politika defterine giriyordu | 0 — çözücü tek kaynak |
+| AI uyarısı | ayrı uyarı üretiyordu | üretmiyor (aynı olay iki kez görünürdü) |
+
+Derece eşleştirmesi kök bazlı: alt dize karşılaştırması Türkçe eklerde
+tutmuyordu ("hattında" ≠ "hattındaki"). Kelimelerin ilk 5 harfi alınıyor.
+
+Gerçek modelle doğrulandı: 0 AI aksiyonu, uydurma derece yok, uyarı kaynağı
+yalnız `optimizer`, özet tutarlı.
+
 ### 🔴 Açık kalanlar
 
-- **`prompts.py` istem kalitesi.** Yapısal hatalar düzeldi (LAN/WAN karıştırma,
-  kendi kanıtıyla çelişme, geçersiz hedef) ama model hâlâ önem derecesini
-  abartıyor. Eşiği isteme yazmak **işe yaramadı** (ölçüldü: `down_utilization`
-  0.175 iken "critical" dedi). Deterministik kalibrasyon eklendi ama yalnız
-  eşiği olan iki metriği kapsıyor. **Asıl soru açık: analist bağımsız tespit
-  yapmaya devam mı etsin, yoksa kural motorunun bulgularını açıklayan role mi
-  çekilsin?** (Bkz. 1. mimari ilke — kod ilkeyle uyumsuz.)
-- **`Flow`'a yol alanı eklenmedi.** Çözücü yolu hesaplıyor, akış kaydına
-  yazılmıyor.
-- **`class_mix` yön ayrımı yapmıyor.** İndirme ve yükleme aynı sınıf
-  karışımıyla bölünüyor. Gerçekte yükleme profili farklı (yedekleme
-  yüklemede baskın). `metrics.py` tarafında yön başına sınıf dağılımı
-  ayrılmadan düzelmez.
-- **İnfaz katmanı yok.** Üretilen plan bir *hedef durum*; `applied` alanı
-  yalnız bir boolean, tüketen kod yok.
-- **Foundry VRAM payı dar.** Model yüklüyken GPU 7903/8188 MiB'da duruyor;
-  başka bir GPU tüketicisi devreye girerse hata dönebilir.
+- **İnfaz katmanı yok.** Plan hâlâ bir *hedef durum*. Mimari kararlaştırıldı:
+  kenarda (Windows domain) QoS politikası + DSCP damgası, çekirdekte router.
+  Router'lar da kontrolümüzde varsayılıyor. Elimizde fiziksel cihaz yok;
+  VirtualBox kurulu olduğu için Linux router sanal makinede test edilebilir.
+- **Talep = ölçülen, istenen değil.** Doygun hatta ölçüm körleşiyor. Çözümü
+  konuşuldu: cihaz başına *profil* (boş saatteki hız, transfer toplam boyutu),
+  anlık ölçüm değil. `db.py` 24 saatlik seriyi zaten tutuyor, kullanılmıyor.
+- **Sınıflandırma gerçek veride yok.** Simülatör sınıfı kendisi söylüyor.
+  Kademeli tasarım konuşuldu: süreç adı (Sysmon) → hedef IP → port → akış
+  şekli → emin değilsen "etkileşimli". Simülatörün etiketleriyle doğruluğu
+  ölçülebilir.
 
 ### Doğrulama durumu
 
 ```
-5 test paketi (t_parse, t_targets, t_sev, t_json, t_flowopt, t_snap)  GECTI
-derleme                                                               temiz
-panel JS (node --check)                                               temiz
-AST taramasi (kullanilmayan import / olu kod)                         temiz
-16 API ucu + WebSocket, 5 senaryo yuk altinda                         200
-AI cagrilari yuk altinda                                    5x200, 0x500
+9 test paketi                                          GECTI
+  t_parse   Foundry uc kesfi (7 vaka)
+  t_json    JSON cikarma (14 vaka)
+  t_targets hedef dogrulama + advise zorlamasi
+  t_sev2    derece eslestirmesi (Turkce ek dahil)
+  t_flowopt akis cozucusu (12 senaryo)
+  t_mix     yon basina sinif karisimi
+  t_actions plandan aksiyon uretimi
+  t_path    yol atama: yapiskanlik + oran
+  t_snap    snapshot butcesi ve budama
+
+derleme · panel JS · AST taramasi                      temiz
+16 API ucu + WebSocket, yuk altinda                    200
+AI cagrilari yuk altinda                               0 x 500
 ```
 
 ## 7. Çalışma anlaşmaları

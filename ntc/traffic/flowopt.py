@@ -37,6 +37,7 @@ sürekliliği infaz katmanının problemi.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from dataclasses import dataclass, field
 from typing import Any
@@ -45,7 +46,13 @@ import numpy as np
 from scipy.optimize import linprog
 from scipy.sparse import csr_matrix
 
-from ..core.models import TrafficClass
+from ..core.models import (
+    ActionKind,
+    OptimizationAction,
+    TrafficClass,
+    new_id,
+    now,
+)
 from .topology import INTERNET, Edge, Topology
 
 log = logging.getLogger(__name__)
@@ -568,15 +575,26 @@ def demands_from_signals(signals: dict[str, Any], devices: dict[str, Any],
     for device_id, sig in signals.items():
         device = devices.get(device_id)
         host = getattr(device, "hostname", None) or str(device_id)
-        mix = getattr(sig, "class_mix", None) or {}
+        genel = getattr(sig, "class_mix", None) or {}
+
+        def mix_for(name: str) -> dict[str, float]:
+            """Yöne özgü karışım; yoksa genel karışıma düş.
+
+            Yön başına ayrı sayılmak zorunda: yedekleme yüklemede baskındır,
+            indirmede değil. Tek karışımla bölmek yükleme tarafındaki sınıf
+            önceliğini bozuyordu.
+            """
+            return getattr(sig, name, None) or genel
 
         if have_internet:
             # İndirme: kaynak internet, hedef cihazın bağlanma noktası.
-            split(host, (getattr(sig, "down_bps", 0.0) or 0.0) / 1e6, mix,
+            split(host, (getattr(sig, "down_bps", 0.0) or 0.0) / 1e6,
+                  mix_for("class_mix_down"),
                   dst=topology.attach_point(host), src=INTERNET,
                   direction="down")
             # Yükleme: cihazdan çıkıyor, kaynak varsayılan (bağlanma noktası).
-            split(host, (getattr(sig, "up_bps", 0.0) or 0.0) / 1e6, mix,
+            split(host, (getattr(sig, "up_bps", 0.0) or 0.0) / 1e6,
+                  mix_for("class_mix_up"),
                   dst=INTERNET, src=None, direction="up")
 
         lan_mbps = (getattr(sig, "lan_bps", 0.0) or 0.0) / 1e6
@@ -585,6 +603,174 @@ def demands_from_signals(signals: dict[str, Any], devices: dict[str, Any],
             target = (lan_targets.get(host)
                       or DEFAULT_LAN_TARGETS.get(kind, LAN_FALLBACK))
             if topology.has_node(target):
-                split(host, lan_mbps, mix, dst=target, src=None,
-                      direction="lan")
+                split(host, lan_mbps, mix_for("class_mix_lan"),
+                      dst=target, src=None, direction="lan")
     return out
+
+
+# ------------------------------------------------------- plandan aksiyonlara
+
+DIRECTION_LABEL = {"down": "indirme", "up": "yükleme", "lan": "LAN içi"}
+
+
+def actions_from_plan(plan: FlowPlan, devices: dict[str, Any],
+                      min_pullback_mbps: float = 0.5,
+                      min_split_mbps: float = 1.0) -> list[OptimizationAction]:
+    """Akış planını uygulanabilir aksiyonlara çevirir.
+
+    **Neden burada:** eşik motoru da aksiyon üretiyordu ve sayılar
+    çakışıyordu — `optimizer.py` "ws-dev-02'yi 70 Mbps'e sınırla" derken
+    çözücü "8.8 Mbps verilebilir" diyordu. Aynı cihaz için iki farklı hız,
+    biri eşikten uydurma, diğeri hesaplanmış. Operatör hangisine bakacağını
+    bilmiyordu.
+
+    Artık iş bölümü net: **eşik motoru durumu tespit eder ve uyarır,
+    sayıyı çözücü verir.** 1. mimari ilkenin karşılığı — karar ölçülebilir
+    bir hesaptan çıkıyor, uydurma bir eşikten değil.
+
+    İki tür aksiyon:
+
+    * `RATE_LIMIT` — talebi karşılanamayan her cihaz/yön için, tavan =
+      ağın gerçekten verebildiği hız.
+    * `REROUTE` — birden çok kenara bölünen akışlar için, hangi çıkıştan
+      ne kadar akacağı.
+    """
+    by_hostname = {getattr(d, "hostname", None): getattr(d, "id", None)
+                   for d in devices.values()}
+    out: list[OptimizationAction] = []
+
+    for row in plan.pullbacks(min_pullback_mbps):
+        host = row["device"]
+        yon = DIRECTION_LABEL.get(row["direction"], row["direction"])
+        # Güven, eksiğin talebe oranından: ağ talebin %90'ını karşılıyorsa
+        # kısma kararı zayıf bir sinyal, %10'unu karşılıyorsa güçlü.
+        eksik_oran = (row["pullback_mbps"] / row["demand_mbps"]
+                      if row["demand_mbps"] > 0 else 0.0)
+        out.append(OptimizationAction(
+            id=new_id("act"), ts=now(), kind=ActionKind.RATE_LIMIT,
+            target=by_hostname.get(host) or host,
+            params={
+                "hostname": host, "direction": row["direction"],
+                "cap_mbps": round(row["granted_mbps"], 2),
+                "demand_mbps": round(row["demand_mbps"], 2),
+                "pullback_mbps": round(row["pullback_mbps"], 2),
+                "classes": row["classes"], "source": "flow-solver",
+            },
+            reason=(f"{host} {yon} yönünde {row['demand_mbps']:.1f} Mbps "
+                    f"istiyor; ağın verebildiği {row['granted_mbps']:.1f} Mbps. "
+                    f"{row['pullback_mbps']:.1f} Mbps geri çekilmeli."),
+            confidence=round(min(0.95, 0.55 + eksik_oran * 0.4), 2),
+            source="rules", applied=False,
+        ))
+
+    # Çok kenara bölünen akışlar — asıl "farklı yola yönlendir" kararı.
+    for a in plan.allocations:
+        if a.granted_mbps <= min_split_mbps:
+            continue
+        # Gerçek bölünme = **tek bir düğümden birden çok kenara** akış
+        # çıkması. İlk sürüm bunu yanlış tespit ediyordu: yol üzerindeki
+        # ardışık durakları (sw-core → wan → internet) paralel çıkış sanıp
+        # tek yollu topolojide bile "bölündü" diyordu.
+        dallar: dict[str, dict[str, float]] = {}
+        for (src, dst), v in a.edge_usage.items():
+            if v > min_split_mbps:
+                dallar.setdefault(src, {})[dst] = v
+        dugum, cikislar = max(dallar.items(), key=lambda kv: len(kv[1]),
+                              default=(None, {}))
+        if len(cikislar) < 2:
+            continue
+        yon = DIRECTION_LABEL.get(a.demand.direction, a.demand.direction)
+        dagilim = ", ".join(f"{k} {v:.1f} Mbps"
+                            for k, v in sorted(cikislar.items(),
+                                               key=lambda kv: -kv[1]))
+        out.append(OptimizationAction(
+            id=new_id("act"), ts=now(), kind=ActionKind.REROUTE,
+            target=by_hostname.get(a.demand.device) or a.demand.device,
+            params={
+                "hostname": a.demand.device,
+                "traffic_class": a.demand.traffic_class.value,
+                "direction": a.demand.direction,
+                "branch_node": dugum,
+                "split_mbps": {k: round(v, 2) for k, v in cikislar.items()},
+                "source": "flow-solver",
+            },
+            reason=(f"{a.demand.device} · {a.demand.traffic_class.value} "
+                    f"({yon}) tek çıkışa sığmıyor; {dugum} düğümünden "
+                    f"{dagilim} olarak bölündü."),
+            confidence=0.8, source="rules", applied=False,
+        ))
+    return out
+
+
+# ---------------------------------------------------------------- yol atama
+
+
+class PathAssigner:
+    """Akışları planın oranlarına göre çıkışlara dağıtır.
+
+    **Akış başına atama, paket başına değil.** Tek bir akışın paketlerini
+    farklı gecikmeli iki yola serpiştirmek TCP'yi yavaşlatıyor: sırasız gelen
+    paket kayıp sanılıyor, gereksiz yeniden gönderim tetikleniyor ve tıkanma
+    penceresi çöküyor. İki hattı birden kullanıp tek hattan yavaş bitirmek
+    mümkün. Sektörün ECMP'yi 5'li demet hash'iyle yapmasının sebebi bu.
+
+    Atama **deterministik hash** ile: aynı akış (aynı kaynak/hedef/port)
+    her seferinde aynı çıkışa düşüyor. Böylece yapışkanlık bedava geliyor —
+    ayrı bir tablo tutmaya gerek yok — ve akış ortasında yol değişmiyor.
+
+    Dağılım planın oranlarını takip ediyor: bir çıkışa payı kadar hash
+    aralığı düşüyor.
+    """
+
+    BUCKETS = 1024
+
+    def __init__(self, plan: FlowPlan | None = None) -> None:
+        self._table: dict[str, list[tuple[int, str]]] = {}
+        if plan is not None:
+            self.update(plan)
+
+    def update(self, plan: FlowPlan) -> None:
+        """Plandan (cihaz, sınıf, yön) → kümülatif çıkış tablosu kurar."""
+        table: dict[str, list[tuple[int, str]]] = {}
+        for a in plan.allocations:
+            if a.granted_mbps <= EPS:
+                continue
+            dallar: dict[str, dict[str, float]] = {}
+            for (src, dst), v in a.edge_usage.items():
+                if v > EPS:
+                    dallar.setdefault(src, {})[dst] = v
+            _, cikislar = max(dallar.items(), key=lambda kv: len(kv[1]),
+                              default=(None, {}))
+            if len(cikislar) < 2:
+                # Tek yol: atanacak bir seçim yok, tabloya girmiyor.
+                continue
+            toplam = sum(cikislar.values())
+            kumulatif, sinir = [], 0
+            for dst, v in sorted(cikislar.items()):
+                sinir += round(self.BUCKETS * v / toplam)
+                kumulatif.append((sinir, dst))
+            if kumulatif:
+                kumulatif[-1] = (self.BUCKETS, kumulatif[-1][1])
+            table[self._key(a.demand.device, a.demand.traffic_class.value,
+                            a.demand.direction)] = kumulatif
+        self._table = table
+
+    @staticmethod
+    def _key(device: str, traffic_class: str, direction: str) -> str:
+        return f"{device}|{traffic_class}|{direction}"
+
+    def assign(self, device: str, traffic_class: str, direction: str,
+               flow_key: str) -> str:
+        """Bir akışa çıkış düğümü atar. Seçenek yoksa boş dize döner."""
+        rows = self._table.get(self._key(device, traffic_class, direction))
+        if not rows:
+            return ""
+        # Sabit tohumlu hash: süreçler arası ve çalıştırmalar arası aynı.
+        # Python'un `hash()`'i dize için rastgele tohumlu, kullanılamaz.
+        digest = hashlib.blake2b(flow_key.encode("utf-8"),
+                                 digest_size=4).digest()
+        bucket = int.from_bytes(digest, "big") % self.BUCKETS
+        for sinir, dst in rows:
+            if bucket < sinir:
+                return dst
+        return rows[-1][1]

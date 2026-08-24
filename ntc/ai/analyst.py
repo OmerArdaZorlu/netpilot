@@ -5,12 +5,11 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import time
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from ..core.config import AIConfig, LinkConfig
+from ..core.config import AIConfig
 from ..core.models import (
     ActionKind,
     Alert,
@@ -42,6 +41,8 @@ _ACTION_ALIASES = {
     "defer": ActionKind.DEFER,
     "delay": ActionKind.DEFER,
     "rebalance": ActionKind.REBALANCE,
+    "reroute": ActionKind.REROUTE,
+    "failover": ActionKind.REROUTE,
     "advise": ActionKind.ADVISE,
 }
 
@@ -176,7 +177,6 @@ class AIAnalyst:
         }
         return self._trim_snapshot(snapshot, self.cfg.max_snapshot_chars)
 
-    @staticmethod
     def _policy_text(optimizer: TrafficOptimizer | None) -> str:
         if optimizer is None or not optimizer.active:
             return "(aktif politika yok)"
@@ -188,16 +188,27 @@ class AIAnalyst:
     # -------------------------------------------------------------------- analiz
 
     async def analyze(self, metrics: MetricsEngine, devices: dict[str, Device],
-                      optimizer: TrafficOptimizer | None = None) -> AIReport:
+                      optimizer: TrafficOptimizer | None = None,
+                      alerts: list[Alert] | None = None,
+                      flow_plan: Any = None) -> AIReport:
+        """Verilen olguları açıklar — yeni sorun tespit etmez.
+
+        Model artık bağımsız bir tespit motoru değil: bulguyu kural motoru ve
+        akış çözücüsü üretiyor, buradaki iş onları operatörün okuyacağı hale
+        getirmek. Sebebi ölçüldü — phi-4-mini sayısal karşılaştırmayı
+        güvenilir yapamıyor (`down_utilization=0.175` iken "critical" dedi,
+        eşik istemde açıkça yazılıyken). Derecelendirme koda alındı.
+        """
         snapshot = self.build_snapshot(metrics, devices, optimizer)
+        facts = self._facts(alerts, flow_plan)
         valid_targets = self._valid_targets(devices)
         prompt = ANALYST_USER.format(
             snapshot=_snapshot_json(snapshot),
-            active_policies=self._policy_text(optimizer),
+            alerts=facts["alerts_text"],
+            flow=facts["flow_text"],
             # Hedefleri isteme yazmak, doğrulayıcının düşürdüğü öneri sayısını
             # baştan azaltıyor: model listeden seçiyor, uydurmuyor.
             targets=", ".join(sorted(valid_targets)),
-            thresholds=self._threshold_text(metrics, optimizer),
         )
 
         started = time.perf_counter()
@@ -216,8 +227,8 @@ class AIAnalyst:
             summary=str(data.get("summary") or
                         ("Analiz üretilemedi." if error else "")),
             health_score=self._clamp_score(data.get("health_score"), snapshot),
-            findings=self._calibrate_severity(
-                self._clean_findings(data.get("findings")), metrics.link),
+            findings=self._attach_severity(
+                self._clean_findings(data.get("findings")), facts["rows"]),
             recommendations=self._clean_recommendations(
                 data.get("recommendations"), valid_targets),
             provider=self.provider.name,
@@ -274,78 +285,98 @@ class AIAnalyst:
         for item in raw[:10]:
             if not isinstance(item, dict):
                 continue
-            severity = str(item.get("severity", "info")).lower()
             out.append({
                 "title": str(item.get("title", "")).strip()[:200],
-                "severity": severity if severity in valid else "info",
-                "evidence": str(item.get("evidence", "")).strip()[:300],
+                # Derece modelden alınmıyor. Eşleşen bir olgu varsa onun
+                # derecesi, yoksa "info". Model uydurduğu bir sorunu yüksek
+                # dereceli gösteremiyor — uyarı akışı temiz kalıyor.
+                "severity": "info",
+                "evidence": str(item.get("explanation")
+                                or item.get("evidence", "")).strip()[:400],
             })
         return [f for f in out if f["title"]]
 
-    # Eşiği olan metrikler. Model bu metrikleri kanıt gösterip önem derecesini
-    # abartırsa (ölçüldü: down_utilization=0.175 için "critical"), kod düzeltir.
-    _THRESHOLDED = ("down_utilization", "up_utilization")
+    @staticmethod
+    def _attach_severity(findings: list[dict[str, Any]],
+                         facts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Modelin açıkladığı bulguya, kaynağındaki dereceyi geri takar.
 
-    _EVIDENCE_PAIR = re.compile(
-        r"([a-z_]+)\s*=\s*(\d+(?:\.\d+)?)")
-
-    @classmethod
-    def _calibrate_severity(cls, findings: list[dict[str, Any]],
-                            link: LinkConfig) -> list[dict[str, Any]]:
-        """Model önem derecesini eşiğe göre yeniden hesaplar.
-
-        phi-4-mini sayısal karşılaştırmayı güvenilir yapamıyor: eşik istemde
-        açıkça 0.80 yazılıyken 0.175 doluluğu "critical" olarak etiketledi
-        (3/3 koşu). Önem derecesi ölçülebilir bir şey, o yüzden modele
-        bırakılmıyor — 1. mimari ilke.
-
-        Yalnızca eşiği olan metrikleri düzeltiyoruz; kanıtı tanımadığımız bir
-        bulguyu olduğu gibi bırakıyoruz (yanlış olabilir ama uydurma bir eşikle
-        düzeltmek daha kötü).
+        Eşleştirme başlık üzerinden ve gevşek: model başlığı birebir
+        kopyalamıyor. Eşleşmeyen bulgu `info` kalıyor, yani uyarıya dönüşmüyor.
         """
-        for f in findings:
-            cited = {m: float(v) for m, v in
-                     cls._EVIDENCE_PAIR.findall(str(f.get("evidence", "")))
-                     if m in cls._THRESHOLDED}
-            if not cited:
-                continue
-            worst = max(cited.values())
-            if worst >= link.critical_threshold:
-                correct = Severity.CRITICAL.value
-            elif worst >= link.congestion_threshold:
-                correct = Severity.HIGH.value
-            else:
-                correct = Severity.INFO.value
-            if f["severity"] != correct:
-                log.info("AI önem derecesi düzeltildi: %r %s -> %s (%s)",
-                         f.get("title"), f["severity"], correct,
-                         ", ".join(f"{k}={v}" for k, v in cited.items()))
-                f["severity"] = correct
+        def tokens(t: str) -> set[str]:
+            """Başlığı kök benzeri parçalara ayırır.
+
+            Alt dize karşılaştırması Türkçe eklerde tutmuyordu: kural motoru
+            "Yükleme hattında tıkanma" derken model "Yükleme hattındaki
+            tıkanma" yazıyor ve hiçbir eşleşme olmuyordu. Kelimelerin ilk 5
+            harfini almak eki düşürüyor ("hattında"/"hattındaki" → "hattı").
+            """
+            words = "".join(ch if ch.isalnum() else " " for ch in t.lower())
+            return {w[:5] for w in words.split() if len(w) >= 4}
+
+        indexed = [(tokens(f["title"]), f) for f in facts]
+        for finding in findings:
+            key = tokens(finding["title"])
+            match = None
+            best = 0.0
+            for fact_tokens, fact in indexed:
+                if not fact_tokens or not key:
+                    continue
+                ortak = len(key & fact_tokens)
+                oran = ortak / min(len(key), len(fact_tokens))
+                # İki anlamlı kelime ortaksa ya da küçük kümenin çoğu
+                # örtüşüyorsa aynı olgudan bahsediyorlar.
+                if (ortak >= 2 or oran >= 0.6) and oran > best:
+                    best, match = oran, fact
+            if match is not None:
+                finding["severity"] = match["severity"]
+                if not finding["evidence"]:
+                    finding["evidence"] = match["evidence"]
         return findings
 
-    @staticmethod
-    def _threshold_text(metrics: MetricsEngine,
-                        optimizer: TrafficOptimizer | None) -> str:
-        """Kural motorunun eşiklerini modele okunur biçimde verir.
 
-        Eşikler `config.yaml`'da tek yerde duruyor; buradan türetiyoruz ki
-        istem ile kural motoru ayrışmasın. Model eşiği bilmediğinde %17
-        doluluğa "yüksek" diyordu (ölçüldü) — sayıyı vermek bunu kesiyor.
+    @staticmethod
+    def _facts(alerts: list[Alert] | None, flow_plan: Any) -> dict[str, Any]:
+        """Modele verilecek olguları derler ve dereceyi kaydeder.
+
+        Önem derecesi burada sabitleniyor: model açıklama yazacak, derece
+        kural motorundan gelecek. Ölçüldü ki model derecelendirmeyi
+        yapamıyor; kural motoru zaten yapıyor.
         """
-        link = metrics.link
-        lines = [
-            f"- hat tıkanması: down_utilization veya up_utilization > "
-            f"{link.congestion_threshold:.2f}",
-            f"- kritik doygunluk: > {link.critical_threshold:.2f}",
-            f"- hat kapasitesi: {link.downlink_mbps:.0f} Mbps indirme / "
-            f"{link.uplink_mbps:.0f} Mbps yükleme",
-        ]
-        if optimizer is not None:
-            lines.append(
-                f"- tek cihaz bant tekeli: toplam bandın "
-                f"{optimizer.cfg.hog_share_threshold:.0%}'inden fazlası")
-        lines.append("- bu eşiklerin altındaki değerler normaldir")
-        return "\n".join(lines)
+        rows: list[dict[str, Any]] = []
+        lines: list[str] = []
+        for alert in (alerts or [])[:10]:
+            rows.append({"title": alert.title,
+                         "severity": alert.severity.value,
+                         "evidence": alert.detail})
+            lines.append(f"- [{alert.severity.value}] {alert.title}: "
+                         f"{alert.detail}")
+
+        flow_lines: list[str] = []
+        if flow_plan is not None:
+            talep = sum(a.demand.mbps for a in flow_plan.allocations)
+            verilen = sum(a.granted_mbps for a in flow_plan.allocations)
+            flow_lines.append(f"- toplam talep {talep:.1f} Mbps, "
+                              f"karşılanan {verilen:.1f} Mbps")
+            for b in flow_plan.bottlenecks()[:4]:
+                flow_lines.append(f"- doymuş bağlantı {b['edge']}: "
+                                  f"{b['load_mbps']:.1f}/{b['capacity_mbps']:.0f} Mbps")
+                rows.append({"title": f"Doymuş bağlantı: {b['edge']}",
+                             "severity": Severity.HIGH.value,
+                             "evidence": f"{b['load_mbps']:.1f}/"
+                                         f"{b['capacity_mbps']:.0f} Mbps"})
+            for r in flow_plan.pullbacks()[:5]:
+                flow_lines.append(
+                    f"- {r['device']} ({r['direction']}): istediği "
+                    f"{r['demand_mbps']:.1f}, verilebilen "
+                    f"{r['granted_mbps']:.1f} Mbps")
+
+        return {
+            "rows": rows,
+            "alerts_text": "\n".join(lines) or "(uyarı yok)",
+            "flow_text": "\n".join(flow_lines) or "(akış çözümü yok)",
+        }
 
     @staticmethod
     def _valid_targets(devices: dict[str, Device]) -> set[str]:
@@ -396,7 +427,10 @@ class AIAnalyst:
 
             for target in targets:
                 out.append({
-                    "action": action if action in _ACTION_ALIASES else "advise",
+                    # AI önerisi her zaman `advise`. Uygulanabilir aksiyonun
+                    # sayısını akış çözücüsü veriyor; modelin oraya ikinci bir
+                    # sayı yazması tam da kaldırdığımız çelişkiyi geri getirir.
+                    "action": "advise",
                     "target": target,
                     "reason": str(item.get("reason", "")).strip()[:400],
                     "confidence": round(confidence, 2),
@@ -427,7 +461,6 @@ class AIAnalyst:
             ))
         return out
 
-    @staticmethod
     def report_alerts(report: AIReport) -> list[Alert]:
         """Yüksek önemli AI bulgularını uyarıya çevirir."""
         out = []
