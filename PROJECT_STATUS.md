@@ -42,7 +42,7 @@ Simulator → Metrics → (Optimizer ‖ AI Analyst) → Controller → API + Pa
 | İnfaz — uzlaştırıcı | `ntc/enforce/engine.py` | ✅ fark uygulama, gölge modu, kapanışta geri alma |
 | Orkestrasyon | `ntc/controller.py` | ✅ 5 async döngü |
 | API + WebSocket | `ntc/api/server.py` | ✅ |
-| Panel | `ntc/dashboard/index.html` | ✅ görsel denetimden geçti (5 genişlik × 2 tema); 7 kusur bulundu ve düzeltildi |
+| Panel | `ntc/dashboard/index.html` | ✅ görsel + erişilebilirlik denetiminden geçti; 12 kusur bulundu ve düzeltildi |
 | CLI | `ntc/cli.py` | ✅ serve / watch / analyze / ask / doctor |
 
 ### Çalıştırma
@@ -811,6 +811,207 @@ Server 2025 Evaluation (ücretsiz, 180 gün) / Azure VM / Win11 Pro yükseltme.
 
    ⚠️ **Denetlenmeyen:** renk kontrast oranları (WCAG) ölçülmedi; klavye ile
    gezinme ve odak görünürlüğü denenmedi; ekran okuyucu denenmedi.
+
+4o. **✅ Açık kusurlar kapatıldı** *(2026-08-25)*
+
+   #### AI önerilerinin %38'i hedef yüzünden düşüyordu
+
+   Canlı koşuda `'Cam-entrance ve cam-parking'` uyarısı görülmüştü. Ölçüldü:
+   8 analiz turu, 26 öneri, **10'u (%38) tümden düşüyordu.** Düşenlere bakınca
+   çoğunun anlamı belliydi, yalnız yazımı tutmuyordu:
+
+   | model ne yazdı | sorun |
+   |---|---|
+   | `Cam-entrance ve cam-parking` | `ve` ayırıcı olarak tanınmıyor |
+   | `Link` | yalnız büyük harf |
+   | `Cam cihazları` | grup ifadesi (`cam-*`) |
+   | `Interactive cihazlar` | geçerli sınıf + gürültü eki |
+   | `Guest Wi-Fi a` | boşluk/tire farkı |
+   | `İnteraktif Trafik` | model sınıf adını **Türkçeye çevirmiş** |
+   | `özellikle ws-dev-02` | baştaki bağlaç |
+
+   `_resolve_targets` yeniden yazıldı: ayırıcıya göre böl → baştaki bağlacı
+   at → kanonik biçimde eşle (yalnız harf+rakam) → gürültü ekini at →
+   Türkçe sınıf adını çevir → grup ön ekini genişlet.
+
+   **%38 → %5** (44 öneri). Kalan ikisi gerçekten hedef değil
+   (`Güvenilirlik`, `güvenilirlik sınıfı` — metrik adları) ve **doğru
+   düşüyor.** Çözümlemeyi daha da gevşetmek, modelin söylemediği bir şeyi
+   söylemiş gibi göstermek olurdu.
+
+   *Bir tuzak ölçümde yakalandı:* `ve` için `` sözcük sınırı yetmiyor —
+   tire de sınır sayılıyor ve `srv-ve-01` gibi meşru bir ad `['srv-','-01']`
+   diye ikiye bölünüyordu. Boşluk şart koşuldu.
+
+   Birim testi iki yönlü: **14 kurtarılmalı + 12 düşmeli**
+   (`t_hedef_birim.py`). İkinci liste birincisi kadar önemli.
+
+   #### Kesilen JSON analizin tamamını çöpe atıyordu
+
+   Aynı ölçümde görüldü: `AI analizi başarısız: JSON tamamlanmamış`. Model
+   bağlamı 4096 token, istem ~1500; model olağandışı uzun bir yanıt yazınca
+   (ölçüldü: 6200 karakter) çıktı ortada kesiliyor ve **tamamen geçerli olan
+   özet ve ilk bulgular da kayboluyordu.** Sıklık 14 analizde 1 — nadir ama
+   kaybedilen şey analizin tamamı.
+
+   `provider._salvage_truncated()`: açık kalan dizeyi ve parantezleri kapatır,
+   ayrıştırır. **Hiçbir değer uydurmuyor** — yarım kalan son alan
+   ayrıştırılamazsa atılıyor. 7 kurtarma + 4 ret vakası (`t_kurtarma.py`).
+
+   ⚠️ **Bilinçli sözleşme değişikliği:** `t_json.py`'deki "yarım JSON
+   reddedilmeli" vakası kaldırıldı. O test eski sözleşmeyi kodluyordu ve
+   düzeltilen kusur tam olarak oydu.
+
+   #### İki sessiz kusur daha
+
+   - **`_policy_text` ölü ve kırıktı.** Sınıf içinde `self` almadan ve
+     `@staticmethod` olmadan tanımlanmış; çağrılsa `TypeError` atardı.
+     Hiçbir yerden çağrılmıyordu — istem artık `policies` alanı almıyor.
+     Silindi.
+   - **`extract_json` sözlük dönmeyi garanti etmiyor** ama imzası öyle
+     diyordu. Model üst düzeyde dizi yazabiliyor (akış yolu bunu bilerek
+     kullanıyor) ve `analyze()` doğrudan `data.get()` çağırıyordu — dizi
+     gelen bir yanıt **yakalanmayan `AttributeError`** ile analiz döngüsünü
+     düşürürdü. İmza düzeltildi, `analyze()`'a tip kapısı kondu.
+
+4p. **✅ Panel erişilebilirlik denetimi — 5 kusur daha** *(2026-08-25)*
+
+   4n'de "denetlenmedi" diye bırakılan taraf: kontrast, klavye, odak.
+   Ölçüm yine enjekte edilen betikle — her metnin **görünen** rengi
+   (saydam katmanlar altındakiyle karıştırılarak) arka planına karşı WCAG
+   oranı hesaplandı, iki temada.
+
+   | # | kusur | ölçüm |
+   |---|---|---|
+   | 8 | **Açık temada 72 metin kontrast eşiğinin altında** | `--muted` yüzeyde 3.50 / zeminde 3.35, eşik 4.5 |
+   | 9 | Birincil düğme okunmuyordu | beyaz metin `--s1` üzerinde 3.64 (koyu) / 4.42 (açık) |
+   | 10 | 9 tablo başlığında `scope` yok | ekran okuyucu hücreyi başlığıyla eşleştiremiyor |
+   | 11 | **Yıkıcı komutlar mavi görünüyordu** | `var(--s1, #e5484d)` — yedek kırmızı hiç uygulanmıyordu |
+   | 12 | Var olmayan tokenlar | `--bg2`, `--line` hiçbir yerde tanımlı değil |
+
+   **8 — tek renk, 72 ihlal.** `--muted: #898781` iki temada da aynıydı;
+   koyu temada 4.85 ile geçiyor, açık temada 3.50 ile kalıyordu. Açık tema
+   için `#726f69` (yüzey 4.88, zemin 4.67); sıcak ton korundu.
+
+   **9 — düğme kendi tokenini aldı.** `--s1` aynı zamanda grafikteki
+   `realtime` serisinin rengi; onu koyulaştırmak grafiği bozardı.
+   `--accent-solid: #2367b8` — beyaz metin 5.67, zemine karşı açıkta 5.29,
+   koyuda 3.43 (bileşen eşiği 3.0). Tek değer iki temada da geçiyor.
+
+   **11 — sessiz ama önemli.** `color: var(--s1, #e5484d)` yazılmıştı: yedek
+   kırmızı ama `--s1` TANIMLI ve mavi, yani yedek hiç uygulanmıyordu.
+   Kaldırılacak kuralın komutu uyarı rengiyle değil sıradan mavi ile
+   çiziliyordu. Silme satırının kırmızı olması süs değil — operatörün "bu
+   kuralı kaldırıyor" diye ayırt ettiği tek işaret.
+
+   **Sonuç: iki temada da 0 kontrast ihlali**, en düşük oran 4.85 (koyu) /
+   4.88 (açık). Odak göstergesi eksik 0, erişilebilir isim eksik 0, başlık
+   seviyesi atlaması 0, `th scope` eksik 0, SVG etiketi eksik 0,
+   `lang="tr"` doğru.
+
+   ⚠️ **Hâlâ denetlenmeyen:** gerçek ekran okuyucu (NVDA/JAWS) ile kullanım,
+   ve renk körlüğü simülasyonu *bu değişikliklerden sonra* tekrarlanmadı
+   (palet daha önce CVD doğrulayıcısından geçmişti; kontrast ayrı bir ölçüt).
+
+4r. **✅ Fazla virgül JSON'u ortadan düşürüyordu** *(2026-08-25)*
+
+   Panelde canlı görüldü: `model hatası: Expecting property name enclosed in
+   double quotes`. Ölçüldü — 25 analiz turu, **1'i (%4)** bu yüzden tamamen
+   kayboluyordu. Ham çıktıya bakınca sebep açıktı:
+
+   ```
+       },
+     ],          <- son elemandan sonra virgül
+   ```
+
+   Hata mesajı yanıltıcı: JSON `,` sonrası bir özellik adı bekliyor ve `]`
+   bulunca "tırnaksız anahtar" diye şikâyet ediyor. `_salvage_truncated` de
+   yetişemiyordu, çünkü bozukluk metnin sonunda değil **ortasında**.
+
+   `provider._strip_trailing_commas()`: dize dışındaki `,` + kapanış
+   ikilisini temizler. Dize içindeki virgüllere dokunmuyor — gerekçe
+   cümlesindeki bir virgülü silmek metni bozardı. Kaçışlı tırnak
+   (`"tirnak \" icinde, virgul"`) doğru izleniyor.
+
+   `t_kurtarma.py` 12 kurtarma + 5 ret vakası.
+
+4s. **✅ Renk körlüğü — kontrast düzeltmelerinden sonra yeniden ölçüldü** *(2026-08-26)*
+
+   4p'de açık bırakılmıştı: kontrast için `--muted` ve düğme rengi değişti,
+   ama renk körlüğü **ayrı bir ölçüt** ve birini düzeltmek ötekini bozabilir.
+
+   **Yöntemi önce doğruladım ve iyi ki: iki kez benim beklentim yanlıştı.**
+
+   - İlk simülatörüm Viénot matrislerini **yanlış uzaya** uyguluyordu.
+     Doğrulama yakaladı: protanopide kırmızı/yeşil 35.4 çıkıyordu, oysa
+     yakınsamaları gerekir. Machado ve ark. (2009) şiddet 1.0 matrislerine
+     geçildi (doğrusal RGB üzerinde çalışıyorlar).
+   - Sonra da *kontrolüm* yanlıştı: "protanopide kırmızı/yeşil ΔE yakın
+     olmalı" diye yazmıştım. Değil — protanopide kırmızı **çok koyulaşır**,
+     yeşil parlak kalır; ikisi **tonda** karışır, parlaklıkta değil. Doğru
+     kontrol ton ekseninde: 96° → **1.4°** (protan), 0.7° (dotan).
+   - Tritanopide hangi çiftin çöktüğünü de varsaymadım, ölçtüm: bu modelde
+     yeşil/camgöbeği 17°'ye yakınsıyor; mavi ayrı kalıyor.
+
+   **Eşiği de uydurmadım.** "ΔE 10 iyi mi kötü mü" sorusunun cevabı yok;
+   ölçüt CVD için **özellikle tasarlanmış** Okabe-Ito paleti oldu.
+
+   #### Soru 1 — kontrast düzeltmelerim bozdu mu?
+
+   **Hayır.** `--muted` değişiminin CVD etkisi bütün kümelerde tam **+0.0**.
+
+   #### Soru 2 — palet mutlak olarak nerede?
+
+   | | Okabe-Ito | biz-açık | biz-koyu |
+   |---|---|---|---|
+   | normal | 21.7 | 24.2 | 21.1 |
+   | protanopi | 15.2 | 14.7 | 11.4 |
+   | **dotanopi** | 11.6 | 9.6 | **3.5** |
+   | tritanopi | 12.1 | 8.2 | 5.5 |
+
+   Trafik sınıfı renkleri (`--s1..--s5`) referansın altında ve bu **önceden
+   beri öyle** — benim değişikliklerimden gelmiyor.
+
+   #### Belirleyici bulgu: bilgi yalnız renkte değil
+
+   Renk taşıyan her öğenin yanında metin var mı diye ölçüldü:
+   **yalnız renkle anlatılan öğe sayısı 0.** Sınıf çubuklarında sınıf adı,
+   doluluk çubuklarında yüzde ve "rahat/yüksek/kritik" sözcüğü, uyarılarda
+   `label` + ikon (•/▲/■) var. Yani zayıf palet bilgi kaybı değil, hız kaybı.
+
+   #### Yine de düzeltilen: yeşil/kırmızı
+
+   `--good` / `--critical` dotanopide **5.4** ile ayırt edilemezdi ve bu çift
+   hat doluluğunu gösteriyor — bir bakışta taranan sinyal.
+
+   Değerler elle seçilmedi; kısıtları sağlayan aday **arandı**: ton kırmızı/
+   yeşil kalacak, hiçbir kümede hiçbir CVD türünde gerileme olmayacak, metin
+   dışı kontrast ≥ 3.0.
+
+   | tema | değişen | dotanopi |
+   |---|---|---|
+   | açık | `--critical` #d03b3b → **#601122** | 5.4 → **33.2** |
+   | koyu | `--good` #0ca30c → **#5bf968** | 5.4 → **25.9** |
+
+   İki temada ters yönde: koyu zeminde kontrast için her renk açık olmak
+   zorunda, orada `critical`'i koyulaştırmak kontrastı 3.62 → 2.35'e
+   düşürürdü.
+
+   *Arama bir tuzağı da gösterdi:* ton kısıtı koymadan en iyi aday
+   `#601122` değil **`#600055`** çıkıyordu — mor bir "kritik" rengi. Metrik
+   daha iyi, tasarım daha kötü. Sayıyı amaç edinmenin sınırı burası.
+
+   *Elle seçtiğim ilk dark aday (`#1cc41c`) protanopide 9.9 → 1.2 gerileme
+   yapıyordu ve ölçüm yakaladı.* Aramanın gerileme kısıtı olmasaydı
+   uygulanmış olurdu.
+
+   **Sonuç:** gerileme yok, `good`/`critical` çifti düzeldi, kontrast iki
+   temada 0 ihlal (en düşük 4.85/4.88), yerleşim üç genişlikte 0 taşma.
+
+   ⚠️ **Açık kalan:** `--s1..--s5` beşlisi dotanopide referansın %70 altında.
+   Düzeltmek beş rengin birden yeniden tasarımı demek ve her biri kontrast +
+   CVD + kimlik kısıtlarını aynı anda sağlamalı. Metin yedeği olduğu için
+   acil değil; yapılırsa aynı arama yöntemiyle yapılmalı.
 
 ### Tasarımı konuşuldu, kodu yazılmadı
 

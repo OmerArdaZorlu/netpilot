@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from dataclasses import asdict, dataclass, field
 from typing import Any
@@ -192,14 +193,6 @@ class AIAnalyst:
         }
         return self._trim_snapshot(snapshot, self.cfg.max_snapshot_chars)
 
-    def _policy_text(optimizer: TrafficOptimizer | None) -> str:
-        if optimizer is None or not optimizer.active:
-            return "(aktif politika yok)"
-        lines = []
-        for action in optimizer.active.values():
-            lines.append(f"- {action.kind.value} -> {action.target}: {action.reason}")
-        return "\n".join(lines)
-
     # -------------------------------------------------------------------- analiz
 
     async def analyze(self, metrics: MetricsEngine, devices: dict[str, Device],
@@ -234,6 +227,15 @@ class AIAnalyst:
             log.warning("AI analizi başarısız: %s", exc)
             data = {}
             error = str(exc)
+        # `complete_json` sözlük dönmeyi garanti etmiyor: model üst düzeyde
+        # bir dizi yazabiliyor (akış yolunda bu bilerek destekleniyor).
+        # Burada dizi gelirse aşağıdaki `data.get(...)` yakalanmayan bir
+        # AttributeError atar ve analiz döngüsünü düşürürdü.
+        if not isinstance(data, dict):
+            log.warning("AI analizi sözlük değil %s döndürdü; yok sayıldı",
+                        type(data).__name__)
+            error = error or "model sözlük yerine dizi döndürdü"
+            data = {}
         latency = (time.perf_counter() - started) * 1000
 
         report = AIReport(
@@ -652,18 +654,133 @@ class AIAnalyst:
     def _resolve_targets(cls, raw: str, valid: set[str]) -> list[str]:
         """Model çıktısındaki hedefi meşru hedeflere çözer.
 
-        Model düzenli olarak üç şeyi karıştırıyor (12 koşuluk ölçümde her
-        koşuda): iki hostname'i tek alana virgülle yazmak, metrik adını hedef
-        sanmak (`lan_mbps`), kanıt dizesini hedefe kopyalamak
-        (`trust=0.95 (srv-backup-01)`). Virgüllü hali kurtarılabilir —
-        parçaların hepsi meşruysa ayrı önerilere açılır. Gerisi düşer.
+        **Ölçüldü (8 analiz turu, 26 öneri): önerilerin %38'i hedef yüzünden
+        tümden düşüyordu.** Düşenlere bakınca çoğunun anlamı belliydi ve
+        yalnız yazımı tutmuyordu:
+
+            'Cam-entrance ve cam-parking'   -> iki cihaz, "ve" ile bağlı
+            'ws-dev-02 ve ws-finance-01'    -> aynısı
+            'Link'                          -> geçerli hedef, yalnız büyük harf
+            'Cam cihazları'                 -> grup: cam-* ile başlayan hepsi
+            'Interactive cihazlar'          -> geçerli sınıf + gürültü eki
+            'Guest Wi-Fi a'                 -> boşluk/tire farkı
+
+        Bunları düşürmek modelin işini görmezden gelmek olurdu; hepsi
+        kurtarılabilir. Kurtarılamayanlar bilerek düşmeye devam ediyor:
+        metrik adı (`lan_mbps`), kanıt dizesi (`trust=0.95 (srv-backup-01)`),
+        soyut kavram (`Güvenilirlik`). Onları zorlamak, modelin söylemediği
+        bir şeyi söylemiş gibi göstermek olurdu.
         """
-        name = raw.strip()
-        if name in valid:
-            return [name]
-        parts = [p.strip() for p in name.split(",") if p.strip()]
-        if len(parts) > 1 and all(p in valid for p in parts):
-            return parts
+        adaylar = cls._split_targets(raw)
+        if not adaylar:
+            return []
+        kanonik = {cls._canon(v): v for v in valid}
+        cozulen: list[str] = []
+        for parca in adaylar:
+            bulunan = cls._match_one(parca, valid, kanonik)
+            if not bulunan:
+                # Parçalardan biri çözülemiyorsa tamamını düşürüyoruz.
+                # Yarısını kabul etmek, modelin "şu ikisi" dediğini
+                # sessizce "şu biri"ye çevirmek olurdu.
+                return []
+            for b in bulunan:
+                if b not in cozulen:
+                    cozulen.append(b)
+        return cozulen
+
+    # Modelin hedefi bölerken kullandığı ayırıcılar.
+    #
+    # `ve` / `and` / `ile` için **boşluk şart**, sözcük sınırı yetmiyor:
+    # `` tireyi de sınır sayıyor ve `srv-ve-01` gibi meşru bir ad
+    # `['srv-', '-01']` diye ikiye bölünüyordu (ölçüldü). Noktalama
+    # ayırıcıları boşluksuz da geçerli.
+    _AYIRICI = re.compile(r"\s*[,;&/]\s*|\s+(?:ve|and|ile)\s+",
+                          re.IGNORECASE)
+    # Modelin hedefe eklediği anlamsız kuyruklar.
+    _GURULTU = ("cihazları", "cihazlari", "cihazlar", "cihazı", "cihazi",
+                "cihaz", "trafiği", "trafigi", "trafik",
+                "sınıfları", "siniflari", "sınıflar", "siniflar",
+                "sınıfı", "sinifi", "sınıf", "sinif",
+                "grubu", "makineleri", "makinesi", "hattı", "hatti")
+
+    # Sınıf adlarının Türkçesi. Panel de model de Türkçe konuşuyor; modelin
+    # `interactive` yerine `İnteraktif` yazması hata değil, çeviri. Ölçüldü:
+    # düşen son iki öneriden biri tam olarak buydu.
+    _TR_SINIF = {
+        "interaktif": "interactive", "etkilesimli": "interactive",
+        "etkileşimli": "interactive",
+        "gerçekzamanlı": "realtime", "gercekzamanli": "realtime",
+        "gerçekzaman": "realtime", "canlı": "realtime", "canli": "realtime",
+        "yayın": "streaming", "yayin": "streaming", "akış": "streaming",
+        "akis": "streaming", "video": "streaming",
+        "toplu": "bulk", "yığın": "bulk", "yigin": "bulk",
+        "arkaplan": "background", "arka": "background",
+        "hat": "link", "bağlantı": "link", "baglanti": "link",
+    }
+
+    # Parçanın başına gelen bağlaç/vurgu sözcükleri. Ölçüldü: model
+    # `"Link cihazı, özellikle ws-dev-02 ve ws-finance-01"` yazdığında
+    # `özellikle ws-dev-02` çözülemiyor ve **öneri tümden** düşüyordu.
+    _ONEK_GURULTU = ("özellikle de", "ozellikle de", "özellikle", "ozellikle",
+                     "bilhassa", "başta", "basta", "yani", "yani ki",
+                     "ayrıca", "ayrica", "en çok", "en cok")
+
+    @classmethod
+    def _split_targets(cls, raw: str) -> list[str]:
+        ad = (raw or "").strip()
+        if not ad:
+            return []
+        parcalar = []
+        for p in cls._AYIRICI.split(ad):
+            p = p.strip()
+            for on in cls._ONEK_GURULTU:
+                if p.lower().startswith(on + " "):
+                    p = p[len(on):].strip()
+                    break
+            if p:
+                parcalar.append(p)
+        return parcalar
+
+    @staticmethod
+    def _canon(s: str) -> str:
+        """Karşılaştırma biçimi: yalnız harf ve rakam, küçük harf.
+
+        `Guest Wi-Fi a` ve `guest-wifi-a` aynı şeyi anlatıyor; noktalama ve
+        boşluk farkı yüzünden öneriyi düşürmek anlamsız.
+        """
+        return "".join(c for c in s.lower() if c.isalnum())
+
+    @classmethod
+    def _match_one(cls, parca: str, valid: set[str],
+                   kanonik: dict[str, str]) -> list[str]:
+        """Tek bir parçayı hedeflere çözer; grup ifadesi birden çok dönebilir."""
+        if parca in valid:
+            return [parca]
+        k = cls._canon(parca)
+        if k in kanonik:
+            return [kanonik[k]]
+        # Gürültü ekini at ve yeniden dene: "Interactive cihazlar" -> interactive
+        for ek in cls._GURULTU:
+            eke = cls._canon(ek)
+            if k.endswith(eke) and len(k) > len(eke):
+                kalan = k[: -len(eke)]
+                if kalan in kanonik:
+                    return [kanonik[kalan]]
+                k = kalan
+                break
+        if k in kanonik:
+            return [kanonik[k]]
+        tr = cls._TR_SINIF.get(k)
+        if tr and tr in valid:
+            return [tr]
+        # Grup ifadesi: "cam" -> cam-entrance, cam-parking. Yalnız EN AZ İKİ
+        # hedefe genişleyen ön ekler kabul ediliyor; tek hedefe genişleyen bir
+        # ön ek zaten yazım hatasıdır ve yukarıdaki kanonik eşleşme onu
+        # yakalamalıydı — burada kabul etmek yanlış cihazı seçme riski.
+        if len(k) >= 3:
+            grup = sorted(v for kk, v in kanonik.items() if kk.startswith(k))
+            if len(grup) >= 2:
+                return grup
         return []
 
     @classmethod

@@ -11,12 +11,17 @@
   --surface:      #fcfcfb;
   --ink:          #0b0b0b;
   --ink-2:        #52514e;
-  --muted:        #898781;
+  /* Ölçüldü: #898781 açık yüzeyde 3.50, açık zeminde 3.35 — WCAG AA eşiği
+     4.5. Açık temada bu tek renk **72 metnin** ihlal kaynağıydı. Koyu temada
+     aynı renk 4.85 ile geçiyor, o yüzden yalnız açık tema değişti.
+     #726f69: yüzey 4.88, zemin 4.67. Sıcak ton korundu. */
+  --muted:        #726f69;
   --grid:         #e1e0d9;
   --axis:         #c3c2b7;
   --ring:         rgba(11,11,11,0.10);
 
   --s1: #2a78d6;  /* realtime   */
+  --accent-solid: #2367b8;  /* dolu düğme zemini; beyaz metin 5.67 */
   --s2: #eb6834;  /* interactive*/
   --s3: #1baf7a;  /* streaming  */
   --s4: #eda100;  /* bulk       */
@@ -25,7 +30,19 @@
   --good:     #0ca30c;
   --warning:  #fab219;
   --serious:  #ec835a;
-  --critical: #d03b3b;
+  /* Dotanopide (erkeklerin ~%6'sı) yeşil ve kırmızı AYNI tona çöküyor —
+     ölçüldü: ton farkı 96° -> 0.7°. Geriye ayıran tek şey parlaklık kalıyor
+     ve eski `--good`/`--critical` çifti orada da yakındı: CIEDE2000 = 5.4,
+     yani ayırt edilemez. Bu çift hat doluluğunu gösteriyor: "rahat" ile
+     "kritik" arasındaki fark.
+
+     Renk tek kanal DEĞİL (ölçüldü: yalnız renkle anlatılan hiçbir öğe yok,
+     her rengin yanında metin var), ama bir bakışta taranan sinyal bu.
+
+     Değer elle seçilmedi: kısıtları sağlayan aday arandı — ton kırmızı
+     kalacak, hiçbir kümede hiçbir CVD türünde gerileme olmayacak, metin dışı
+     kontrast >= 3.0. Açık temada `critical` koyulaşıyor: 5.4 -> 33.2. */
+  --critical: #601122;
 }
 @media (prefers-color-scheme: dark) {
   :root:where(:not([data-theme="light"])) {
@@ -34,6 +51,11 @@
     --muted: #898781; --grid: #2c2c2a; --axis: #383835;
     --ring: rgba(255,255,255,0.10);
     --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181;
+    /* Koyu zeminde kontrast için her renk açık olmak zorunda; orada
+       `critical`'i koyulaştırmak kontrastı 3.62 -> 2.35'e düşürürdü.
+       Ayrım ters yönden yapılıyor: `good` açılıyor. 5.4 -> 25.9,
+       4.5 kontrast payında bile duruyor. */
+    --good: #5bf968;
   }
 }
 :root[data-theme="dark"] {
@@ -42,6 +64,11 @@
   --muted: #898781; --grid: #2c2c2a; --axis: #383835;
   --ring: rgba(255,255,255,0.10);
   --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181;
+  /* Koyu zeminde kontrast için her renk açık olmak zorunda; orada
+     `critical`'i koyulaştırmak kontrastı 3.62 -> 2.35'e düşürürdü.
+     Ayrım ters yönden yapılıyor: `good` açılıyor. 5.4 -> 25.9,
+     4.5 kontrast payında bile duruyor. */
+  --good: #5bf968;
 }
 
 * { box-sizing: border-box; }
@@ -197,7 +224,12 @@ button {
   button, .btnrow button { min-height: 44px; padding: 8px 14px; }
 }
 button:hover { border-color: var(--axis); }
-button.primary { background: var(--s1); border-color: var(--s1); color: #fff; }
+/* Beyaz metin `--s1` üzerinde 3.64 (koyu tema) / 4.42 (açık tema) veriyordu;
+   ikisi de 4.5 eşiğinin altında. `--s1` aynı zamanda grafikteki `realtime`
+   serisinin rengi, onu değiştirmek grafiği bozardı — düğmeye kendi tokeni
+   verildi. #2367b8: beyaz metin 5.67; zemine karşı açıkta 5.29, koyuda 3.43
+   (bileşen eşiği 3.0). Tek değer iki temada da geçiyor. */
+button.primary { background: var(--accent-solid); border-color: var(--accent-solid); color: #fff; }
 button:disabled { opacity: .45; cursor: default; }
 .btnrow { display: flex; flex-wrap: wrap; gap: 8px; }
 
@@ -228,13 +260,22 @@ svg text { fill: var(--muted); font-size: 10px; }
    sayfa gövdesi kaymasın. */
 .cmds {
   margin: 0; padding: 12px; border-radius: 8px;
-  background: var(--bg2, rgba(127,127,127,.08));
-  border: 1px solid var(--line, rgba(127,127,127,.2));
+  /* `--bg2` ve `--line` hiçbir yerde tanımlı değildi; yedek değerler her
+     zaman uygulanıyordu. Var olmayan token adı, sonradan bakan birine var
+     olmayan bir renk sistemi olduğunu düşündürür. Gerçek tokenlara bağlandı. */
+  background: var(--grid);
+  border: 1px solid var(--axis);
   font-size: 12px; line-height: 1.6; overflow-x: auto;
   white-space: pre; min-height: 60px; max-height: 320px; overflow-y: auto;
 }
-.cmds .del { color: var(--s1, #e5484d); }
-.cmds .note { color: var(--muted); }
+/* `var(--s1, #e5484d)`: yedek kırmızıydı ama `--s1` TANIMLI ve mavi —
+   yedek hiç uygulanmıyordu. Yani **yıkıcı komutlar mavi görünüyordu**,
+   uyarı rengiyle değil. Silme satırının kırmızı olması bir süs değil,
+   operatörün "bu kuralı kaldırıyor" diye ayırt ettiği tek işaret. */
+.cmds .del { color: var(--critical); }
+/* `.cmds` zemini `--grid`; orada `--muted` 4.43'e düşüyordu (eşik 4.5).
+   Ölçüldü. Bu bağlamda bir tık güçlü olan `--ink-2` kullanılıyor. */
+.cmds .note { color: var(--ink-2); }
 </style>
 </head>
 <body>
@@ -284,8 +325,8 @@ svg text { fill: var(--muted); font-size: 10px; }
       <div class="scroll">
         <table id="devices">
           <thead><tr>
-            <th>Cihaz</th><th>Tür</th><th>WAN ind.</th><th>WAN yük.</th><th>LAN içi</th>
-            <th>Akış</th><th>RTT</th><th>Baskın uygulama</th><th>Politika</th>
+            <th scope="col">Cihaz</th><th scope="col">Tür</th><th scope="col">WAN ind.</th><th scope="col">WAN yük.</th><th scope="col">LAN içi</th>
+            <th scope="col">Akış</th><th scope="col">RTT</th><th scope="col">Baskın uygulama</th><th scope="col">Politika</th>
           </tr></thead>
           <tbody></tbody>
         </table>

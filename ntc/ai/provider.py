@@ -114,8 +114,138 @@ def _collapse_arithmetic(text: str) -> str:
     return text
 
 
-def extract_json(raw: str) -> dict[str, Any]:
-    """Metnin içinden ilk geçerli JSON nesnesini söker.
+def _strip_trailing_commas(text: str) -> str:
+    """`,` + kapanış parantezi ikilisini temizler — dize dışındakileri.
+
+    **Neden var:** phi-4-mini düzenli olarak son elemandan sonra virgül
+    bırakıyor (`},
+  ],`). JSON bunu kabul etmez ve hata mesajı yanıltıcı
+    oluyor: *"Expecting property name enclosed in double quotes"* — panelde
+    görülen tam bu. Kesilme kurtarması da işe yaramıyordu, çünkü sorun
+    metnin sonunda değil ortasında.
+
+    Dize içindeki virgüllere dokunulmuyor; gerekçe cümlesindeki bir virgül
+    silinirse metin bozulur.
+    """
+    out: list[str] = []
+    icerde = False
+    kacis = False
+    for ch in text:
+        if icerde:
+            out.append(ch)
+            if kacis:
+                kacis = False
+            elif ch == chr(92):
+                kacis = True
+            elif ch == '"':
+                icerde = False
+            continue
+        if ch == '"':
+            icerde = True
+            out.append(ch)
+            continue
+        if ch in "}]":
+            # Geriye doğru boşlukları atla; virgül varsa at.
+            i = len(out) - 1
+            while i >= 0 and out[i].isspace():
+                i -= 1
+            if i >= 0 and out[i] == ",":
+                del out[i]
+        out.append(ch)
+    return "".join(out)
+
+
+def _salvage_truncated(text: str) -> dict[str, Any] | None:
+    """Yarıda kesilmiş bir JSON nesnesinden kurtarılabileni çıkarır.
+
+    **Neden var:** model bağlamı 4096 token ve istem ~1500 token. Model
+    olağandışı uzun bir yanıt yazdığında (ölçüldü: 6200 karakter) çıktı
+    ortasında kesiliyor ve `extract_json` hiçbir şey döndüremiyordu — yani
+    **tamamen geçerli olan özet ve ilk bulgular da çöpe gidiyordu.** Ölçülen
+    sıklık 14 analizde 1; nadir ama kaybedilen şey analizin tamamı.
+
+    Yaptığı tek şey: açık kalan dizeyi ve parantezleri kapatmak, sonra
+    ayrıştırmak. **Hiçbir değer uydurmuyor** — yarım kalan son alan
+    ayrıştırılamazsa atılıyor. Kurtarılan nesne eksik olabilir; çağıran
+    taraf zaten eksik alanı tolere ediyor (`data.get(...)`).
+    """
+    start = text.find("{")
+    if start == -1:
+        return None
+    govde = text[start:]
+
+    # Dize içinde miyiz, hangi parantezler açık?
+    yigin: list[str] = []
+    icerde = False
+    kacis = False
+    son_guvenli = 0          # dize dışında kapanan son elemanın sonu
+    for i, ch in enumerate(govde):
+        if icerde:
+            if kacis:
+                kacis = False
+            elif ch == "\\":
+                kacis = True
+            elif ch == '"':
+                icerde = False
+        elif ch == '"':
+            icerde = True
+        elif ch in "{[":
+            yigin.append("}" if ch == "{" else "]")
+        elif ch in "}]":
+            if yigin:
+                yigin.pop()
+            son_guvenli = i + 1
+        elif ch == "," and not yigin[1:]:
+            son_guvenli = i + 1
+
+    if not yigin and not icerde:
+        return None          # kesik değil; asıl ayrıştırıcı zaten denedi
+
+    adaylar = []
+    # 1) Olduğu gibi kapat.
+    adaylar.append(govde + ('"' if icerde else "") + "".join(reversed(yigin)))
+    # 2) Yarım kalan son alanı at, oradan kapat. Yarım bir alan geçerli
+    #    ayrıştırılsa bile yanlış veri taşır; atmak uydurmaktan iyidir.
+    if son_guvenli:
+        kirp = govde[:son_guvenli].rstrip().rstrip(",")
+        y2: list[str] = []
+        ic2 = False
+        kc2 = False
+        for ch in kirp:
+            if ic2:
+                if kc2:
+                    kc2 = False
+                elif ch == "\\":
+                    kc2 = True
+                elif ch == '"':
+                    ic2 = False
+            elif ch == '"':
+                ic2 = True
+            elif ch in "{[":
+                y2.append("}" if ch == "{" else "]")
+            elif ch in "}]" and y2:
+                y2.pop()
+        adaylar.append(kirp + "".join(reversed(y2)))
+
+    for aday in adaylar:
+        try:
+            parsed = json.loads(aday)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict) and parsed:
+            return parsed
+    return None
+
+
+def extract_json(raw: str) -> Any:
+    """Metnin içinden ilk geçerli JSON değerini söker.
+
+    **Sözlük dönmesi garanti DEĞİL.** Model üst düzeyde bir dizi
+    döndürebiliyor ve `flowai._normalize` bunu bilerek kullanıyor
+    (tahsisleri liste olarak veren şema varyantı). Çağıran taraf sözlük
+    bekliyorsa kendisi kontrol etmek zorunda — imza sözlük derken
+    `analyze()` doğrudan `data.get()` çağırıyordu ve liste gelen bir yanıt
+    yakalanmayan `AttributeError` ile analiz döngüsünü düşürürdü.
 
     Küçük modeller sık sık ```json bloğu veya "İşte analiz:" gibi bir önsöz
     ekler; bunları temizlemeden parse etmek üretimde en sık kırılan yer.
@@ -124,6 +254,10 @@ def extract_json(raw: str) -> dict[str, Any]:
     if not text:
         raise ValueError("model boş yanıt döndürdü")
     text = _collapse_arithmetic(text)
+    # Fazla virgül ayrıştırmayı belgenin ORTASINDA düşürüyor; kesilme
+    # kurtarması oraya yetişemiyor. Ölçüldü: 25 analizin 1'i bu yüzden
+    # tamamen kayboluyordu.
+    text = _strip_trailing_commas(text)
 
     # Kod bloklarını sırayla dene. Tek blok yakalayıp `text`'in üstüne yazmak
     # üretimde kırıldı: model bozuk bir blok açıp (```ple ...) ardından doğru
@@ -149,6 +283,12 @@ def extract_json(raw: str) -> dict[str, Any]:
     found = _scan_object(text)
     if found is not None:
         return found
+
+    kurtarilan = _salvage_truncated(text)
+    if kurtarilan is not None:
+        log.warning("JSON yarıda kesilmişti; %d alan kurtarıldı",
+                    len(kurtarilan))
+        return kurtarilan
 
     start = text.find("{")
     if start == -1:
