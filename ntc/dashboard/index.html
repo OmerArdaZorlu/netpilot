@@ -54,6 +54,13 @@ h1, h2, h3 { margin: 0; font-weight: 600; }
 
 /* ------------------------------------------------------------ akış planı */
 .flow-grid { display: grid; grid-template-columns: 1.25fr 1fr; gap: 24px; }
+/* Izgara ogesinin varsayilan `min-width: auto` degeri, icerigin dogal en
+   kucuk genisliginin altina inmesini engelliyor. `.cmds` `white-space: pre`
+   oldugu icin o dogal genislik en uzun komut satiri kadar — ve sutun
+   kuculmeyince TUM SAYFA yana kayiyordu. Olculdu: 390px'de 360px, 768px'de
+   114px, 1024px'te 16px yatay tasma. `.cmds` uzerindeki `overflow-x:auto`
+   yetmiyor: kisitlanmasi gereken kap, ogenin kendisi. */
+.flow-grid > * { min-width: 0; }
 @media (max-width: 900px) { .flow-grid { grid-template-columns: 1fr; } }
 .flow-h {
   font-size: 12px; font-weight: 600; letter-spacing: .04em;
@@ -84,7 +91,17 @@ header {
 header h1 { font-size: 15px; letter-spacing: .01em; }
 .spacer { flex: 1; }
 main { padding: 20px 24px 48px; display: grid; gap: 16px; max-width: 1600px; }
+/* Dar ekranda 48px yatay dolgu, 390px'lik bir viewport'un %12'si. */
+@media (max-width: 560px) {
+  main { padding: 14px 12px 32px; gap: 12px; }
+  .card { padding: 13px 13px; }
+}
 .grid { display: grid; gap: 16px; }
+/* Kartlar satirdaki en uzunun boyuna uzamiyor. Olculdu: "Uyarilar" karti
+   40 karakterlik metinle 632px, "Optimizasyon politikalari" 298px yer
+   kapliyordu. Hizalama ugruna ekranin yarisini bosa harcamak, panelin
+   asil isi olan "bir bakista durum" hedefine ters. */
+.grid.cols-2, .grid.cols-3 { align-items: start; }
 @media (min-width: 1000px) { .cols-2 { grid-template-columns: 3fr 2fr; } }
 @media (min-width: 1240px) { .cols-3 { grid-template-columns: 1fr 1fr 1fr; } }
 
@@ -123,11 +140,25 @@ main { padding: 20px 24px 48px; display: grid; gap: 16px; max-width: 1600px; }
 
 /* ---------------------------------------------------------- class bars */
 .classrow { display: grid; grid-template-columns: 96px 1fr 78px; align-items: center; gap: 10px; margin-bottom: 9px; font-size: 12px; }
+/* 390px'de sabit 96+78+20 = 194px, cubuga ~100px kaliyor ve cubuk
+   okunamaz hale geliyor. Dar ekranda etiketler daralir, cubuk buyur. */
+@media (max-width: 560px) {
+  .classrow { grid-template-columns: 74px 1fr 62px; gap: 7px; }
+}
 .classrow:last-child { margin-bottom: 0; }
 .classrow .name { color: var(--ink-2); }
 .classrow .track { height: 10px; background: var(--grid); border-radius: 4px; overflow: hidden; }
-.classrow .bar { height: 100%; border-radius: 4px; transition: width .4s ease; }
+/* `display: block` SART. `.bar` bir <span> ve satir ici elemanda
+   `height: 100%` hicbir sey yapmaz — kutu sifir yukseklige cokuyordu.
+   Sonuc: panelde bu sinifi kullanan BUTUN cubuklar bombostu (trafik sinifi
+   dagilimi dahil) ve kimse fark etmemisti, cunku bos bir cubuk "deger dusuk"
+   diye okunuyor. Gorsel denetimde yakalandi. */
+.classrow .bar { display: block; height: 100%; border-radius: 4px; transition: width .4s ease; }
 .classrow .val { text-align: right; font-variant-numeric: tabular-nums; color: var(--ink); }
+/* Katman satiri iki sayi tasiyor (pay → isabet); 78px'de etiket iki satira
+   kaciyordu. Yalniz o listede sutun genis. */
+.wide-val .classrow { grid-template-columns: 96px 1fr 96px; }
+@media (max-width: 560px) { .wide-val .classrow { grid-template-columns: 74px 1fr 84px; } }
 
 /* ------------------------------------------------------------- tables */
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
@@ -156,6 +187,14 @@ button {
   font: inherit; font-size: 12px; padding: 5px 11px; border-radius: 7px;
   border: 1px solid var(--ring); background: var(--surface); color: var(--ink);
   cursor: pointer;
+  /* Olculdu: butun dugmeler 30px yuksekligindeydi. Fare ile sorun degil ama
+     panel bir tabletten de acilacak; dokunmatikte 30px isabetsiz kaliyor.
+     36px fare gorunumunu bozmadan dokunulabilir hale getiriyor. */
+  min-height: 36px;
+}
+/* Dokunmatik girdide hedefi daha da buyut — fare gorunumu degismeden. */
+@media (pointer: coarse) {
+  button, .btnrow button { min-height: 44px; padding: 8px 14px; }
 }
 button:hover { border-color: var(--axis); }
 button.primary { background: var(--s1); border-color: var(--s1); color: #fff; }
@@ -330,6 +369,30 @@ svg text { fill: var(--muted); font-size: 10px; }
     </div>
   </section>
 
+  <section class="card" id="classify-card">
+    <header>
+      <h2>Trafik sınıflandırma</h2>
+      <span class="sub" id="classify-sub">yükleniyor…</span>
+      <span style="flex:1"></span>
+      <span class="badge" id="classify-mode">—</span>
+    </header>
+
+    <div class="flow-grid">
+      <div>
+        <h3 class="flow-h">Kararı hangi katman verdi</h3>
+        <div id="classify-layers" class="wide-val"></div>
+        <h3 class="flow-h" style="margin-top:20px">Belirsiz portlar</h3>
+        <div class="feed" id="classify-ambiguous"></div>
+      </div>
+      <div>
+        <h3 class="flow-h">Sınıf başına isabet</h3>
+        <div id="classify-classes"></div>
+        <h3 class="flow-h" style="margin-top:20px">Uyuşmayanlar</h3>
+        <div class="feed" id="classify-wrong"></div>
+      </div>
+    </div>
+  </section>
+
   <section class="card">
     <header><h2>Simülasyon senaryoları</h2>
       <span class="sub">demo için trafik olayı tetikle</span></header>
@@ -408,12 +471,13 @@ const postJSON = (path, body) => api(path, {
 
 async function refreshSlow() {
   try {
-    const [status, devices, actions, scenarios, flow, enforce] = await Promise.all([
+    const [status, devices, actions, scenarios, flow, enforce, classify] = await Promise.all([
       api("/api/status"), api("/api/devices"),
       api("/api/actions"), api("/api/sim/scenarios"),
       // Plan 15 sn'de bir yenileniyor; burada okumak ayrı bir döngüden ucuz.
       api("/api/flow/plan").catch(() => null),
       api("/api/enforce/state").catch(() => null),
+      api("/api/classify").catch(() => null),
     ]);
     state.status = status;
     state.devices = devices;
@@ -422,8 +486,10 @@ async function refreshSlow() {
     state.available = scenarios.available;
     if (flow) state.flow = flow;
     if (enforce) state.enforce = enforce;
+    if (classify) state.classify = classify;
     renderHeader(); renderTiles(); renderDevices();
     renderPolicies(); renderScenarios(); renderFlow(); renderEnforce();
+    renderClassify();
   } catch (err) { console.warn("durum alınamadı", err); }
 }
 
@@ -585,7 +651,9 @@ function renderChart() {
   const wrap = $("#chart-wrap");
   const data = state.history;
   const W = wrap.clientWidth || 640, H = 220;
-  const M = { top: 12, right: 52, bottom: 24, left: 44 };
+  // `top: 12` iken "Mbps" basligi en ust eksen degerinin uzerine biniyordu:
+  // baslik y=10'da, en ust cizgi y=15'te, yazi ~11px. Ust bosluk buyudu.
+  const M = { top: 26, right: 52, bottom: 24, left: 44 };
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
   svg.innerHTML = "";
 
@@ -619,7 +687,7 @@ function renderChart() {
     }, Math.round(v)));
   }
   svg.appendChild(el("text", {
-    x: M.left - 8, y: M.top - 2, "text-anchor": "end",
+    x: M.left - 8, y: M.top - 12, "text-anchor": "end",
   }, "Mbps"));
 
   // Kapasite referans çizgisi
@@ -1063,6 +1131,92 @@ try {
   const saved = localStorage.getItem("ntc-theme");
   if (saved) document.documentElement.dataset.theme = saved;
 } catch {}
+
+/* Sınıflandırma kartı — sınıfı kimin belirlediği.
+
+   Genel bir doğruluk yüzdesi tek başına yanıltıcı olurdu: trafiğin çoğu tek
+   sınıflı portlardan gelir ve orada isabet zaten %100'dür. Asıl soru
+   BELİRSİZ olanda ne olduğu, o yüzden kart **katman başına pay ve isabet**
+   gösteriyor. Şekil katmanının payı büyük ve isabeti düşükse, yüksek bir
+   genel yüzde hiçbir şey ifade etmiyor demektir. */
+const BASIS_LABEL = {
+  surec: "Süreç adı", ip: "Hedef IP", port: "Port",
+  sekil: "Akış şekli", varsayilan: "Varsayılan",
+};
+const BASIS_COLOR = {
+  surec: "var(--good)", ip: "var(--s1)", port: "var(--s3)",
+  sekil: "var(--warning)", varsayilan: "var(--muted)",
+};
+
+function renderClassify() {
+  const c = state.classify;
+  const sub = $("#classify-sub"), mode = $("#classify-mode");
+  const bos = (k, m) => { $(k).innerHTML = `<p class="empty">${m}</p>`; };
+  if (!c || c.enabled === false) {
+    sub.textContent = "sınıflandırma kapalı";
+    mode.textContent = "kapalı";
+    ["#classify-layers", "#classify-ambiguous", "#classify-classes",
+     "#classify-wrong"].forEach((k) => { $(k).innerHTML = ""; });
+    return;
+  }
+
+  mode.textContent = c.mode === "golge"
+    ? "gölge · sınıfı yazmıyor" : "CANLI · sınıfı yazıyor";
+  /* Gölge modda gerçek etiket var, uyum ölçülebilir. Canlı yakalamada
+     karşılaştırılacak bir doğru yok; sıfır göstermek "kötü çalışıyor" diye
+     okunurdu, o yüzden açıkça "ölçülemez" yazıyoruz. */
+  sub.textContent = c.agreement == null
+    ? `${c.total} akış · uyum ölçülemez (gerçek etiket yok)`
+    : `${c.total} akış · etikete uyum %${(c.agreement * 100).toFixed(1)}`;
+
+  const paylar = Object.entries(c.by_basis || {})
+    .sort((a, b) => b[1].share - a[1].share);
+  $("#classify-layers").innerHTML = paylar.length ? paylar.map(([k, v]) =>
+    `<div class="classrow">
+       <span class="name">${esc(BASIS_LABEL[k] || k)}</span>
+       <span class="track"><span class="bar" style="width:${
+             (v.share * 100).toFixed(1)}%; background:${
+             BASIS_COLOR[k] || "var(--axis)"}"></span></span>
+       <span class="val">%${(v.share * 100).toFixed(0)}${
+         v.hit == null ? "" : " → %" + (v.hit * 100).toFixed(0)}</span>
+     </div>`).join("") : `<p class="empty">Henüz akış görülmedi.</p>`;
+
+  const siniflar = CLASS_ORDER.filter((k) => (c.by_class || {})[k]);
+  $("#classify-classes").innerHTML = siniflar.length ? siniflar.map((k) => {
+    const v = c.by_class[k];
+    return `<div class="classrow">
+       <span class="name">${esc(CLASS_LABEL[k] || k)}</span>
+       <span class="track"><span class="bar" style="width:${
+             ((v.rate ?? 0) * 100).toFixed(1)}%;
+             background:${CLASS_COLOR[k]}"></span></span>
+       <span class="val">${v.rate == null ? "—"
+         : "%" + (v.rate * 100).toFixed(0)} · ${v.total}</span>
+     </div>`;
+  }).join("") : `<p class="empty">Henüz akış görülmedi.</p>`;
+
+  /* Belirsiz portlar katalogdan türetiliyor; elle yazılsaydı katalogla
+     sessizce ayrışırdı ve ayrışma yanlış sınıflandırma demek olurdu. */
+  const amb = Object.entries(c.ambiguous_ports || {});
+  if (!amb.length) bos("#classify-ambiguous", "Belirsiz port yok.");
+  else $("#classify-ambiguous").innerHTML = amb.map(([port, adlar]) =>
+    `<div class="item"><span class="dot" style="background:var(--warning)"></span>
+       <div class="body">
+         <div class="title">${esc(port)} — ${adlar.length} uygulama</div>
+         <div class="detail">${esc(adlar.join(", "))}</div>
+         <div class="when">port tek başına karar veremez; IP ve şekle düşülür</div>
+       </div></div>`).join("");
+
+  const y = c.disagreements || [];
+  if (!y.length) bos("#classify-wrong", "Uyuşmazlık yok — her akış doğru sınıflandı.");
+  else $("#classify-wrong").innerHTML = y.slice(-12).reverse().map((d) =>
+    `<div class="item"><span class="dot" style="background:var(--critical)"></span>
+       <div class="body">
+         <div class="title">${esc(d.app || "?")} · ${esc(d.port)}</div>
+         <div class="detail">${esc(CLASS_LABEL[d.gercek] || d.gercek)} olması
+           gerekirken ${esc(CLASS_LABEL[d.tahmin] || d.tahmin)} dendi —
+           ${esc(BASIS_LABEL[d.katman] || d.katman)} katmanı</div>
+       </div></div>`).join("");
+}
 
 new ResizeObserver(() => renderChart()).observe($("#chart-wrap"));
 

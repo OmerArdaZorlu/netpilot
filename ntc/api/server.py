@@ -104,6 +104,18 @@ def create_app(cfg: Config | None = None) -> FastAPI:
                             device_id: str | None = None):
         return await controller.storage.recent_notable_flows(limit, device_id)
 
+    @app.get("/api/classify")
+    async def classify_report():
+        """Sınıflandırıcının canlı denetimi.
+
+        `agreement` yalnız gerçek etiketin bilindiği yerde (simülasyon)
+        anlamlı; canlı yakalamada `None` döner çünkü karşılaştırılacak bir
+        doğru yoktur. `by_basis` hangi katmanın ne kadar taşıdığını
+        gösteriyor — bu olmadan "sınıflandırma çalışıyor" ölçülemez bir
+        iddia olurdu.
+        """
+        return controller.classifier.report()
+
     @app.get("/api/flow/plan")
     async def flow_plan():
         """Son akış çözümü: kime ne kadar, hangi kenardan, kimden ne kadar geri."""

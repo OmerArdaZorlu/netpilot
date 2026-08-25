@@ -174,6 +174,61 @@ def egress_rows(topology: Any) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------- doğrulama
 
 
+def _normalize(raw: Any) -> dict[str, Any] | None:
+    """Modelin ürettiği şema varyantlarını tek biçime indirir.
+
+    **Neden var:** rastgele mimarilerde ölçüldü ki phi-4-mini şemayı bazı
+    ağlarda kendiliğinden değiştiriyor — üst düzeyde bir *liste* döndürüyor
+    ve her elemanın içine kendi `allocations` alanını koyuyor:
+
+        [{"id": "r1", "rationale": "...", "allocations": {...}}, ...]
+
+    İçerik doğruydu (10 satır, makul sayılar, bacaklar seçilmiş) ama
+    `raw.get("allocations")` bulunamadığı için plan tümden reddediliyordu.
+    Yani modelin verdiği iyi cevabı **biz** çöpe atıyorduk. Ölçümde bu tek
+    başına 10 ağın 1'ini geçersizden 10 tahsise çeviriyor.
+
+    Kabul edilen biçimler: üst düzey liste, `allocations` alanı tek sözlük,
+    ve satırların içine gömülmüş `allocations`.
+    """
+    if isinstance(raw, dict) and isinstance(raw.get("allocations"), list):
+        duz = _flatten(raw["allocations"])
+        if duz:
+            return {"situation": raw.get("situation", ""),
+                    "rationale": raw.get("rationale", ""), "allocations": duz}
+    if isinstance(raw, dict) and isinstance(raw.get("allocations"), dict):
+        return {"situation": raw.get("situation", ""),
+                "rationale": raw.get("rationale", ""),
+                "allocations": [raw["allocations"]]}
+    if isinstance(raw, list):
+        duz = _flatten(raw)
+        if not duz:
+            return None
+        # Gerekçe satırlara dağılmış oluyor; ilk dolu olanı alıyoruz.
+        durum = next((str(x.get("situation", "")) for x in raw
+                      if isinstance(x, dict) and x.get("situation")), "")
+        gerekce = next((str(x.get("rationale", "")) for x in raw
+                        if isinstance(x, dict) and x.get("rationale")), "")
+        return {"situation": durum, "rationale": gerekce, "allocations": duz}
+    return None
+
+
+def _flatten(items: Any) -> list[dict[str, Any]]:
+    """Sarmalanmış tahsis satırlarını düz listeye açar."""
+    out: list[dict[str, Any]] = []
+    for it in items if isinstance(items, list) else []:
+        if not isinstance(it, dict):
+            continue
+        ic = it.get("allocations")
+        if isinstance(ic, dict):
+            out.append(ic)
+        elif isinstance(ic, list):
+            out.extend(x for x in ic if isinstance(x, dict))
+        elif "grant_mbps" in it or "id" in it:
+            out.append(it)
+    return out
+
+
 def validate(raw: Any, rows: list[dict[str, Any]],
              legs: list[dict[str, Any]]) -> AIFlowPlan:
     """Modelin önerisini kısıtlara karşı doğrular ve gerekirse onarır.
@@ -184,9 +239,13 @@ def validate(raw: Any, rows: list[dict[str, Any]],
     doğrulayıcı planın yarısını yeniden yazmışsa karar AI'ın değildir.
     """
     plan = AIFlowPlan()
-    if not isinstance(raw, dict):
-        plan.issues.append("öneri bir sözlük değil")
+    duz = _normalize(raw)
+    if duz is None:
+        plan.issues.append("öneri tanınan bir biçimde değil")
         return plan
+    if not isinstance(raw, dict) or not isinstance(raw.get("allocations"), list):
+        plan.issues.append("şema düzeltildi: model alışılmış biçimi vermedi")
+    raw = duz
 
     # Kimlik → satır. Model adı yeniden yazmıyor, kimlik veriyor.
     by_id = {r["id"]: r for r in rows if "id" in r}

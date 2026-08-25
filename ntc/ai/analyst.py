@@ -113,7 +113,11 @@ class AIAnalyst:
             return snapshot
         rows = snapshot.get("devices") or []
         dropped = 0
-        while len(rows) > 1 and                 len(json.dumps(snapshot, ensure_ascii=False)) > max_chars:
+        # Ölçü `_snapshot_json` olmalı: kapı sıkıştırılmış metni ölçerken
+        # döngü girintili metni ölçüyordu, yani gönderilenden uzun bir şeyi.
+        # Sonuç, bütçe aslında yeterken cihaz atmak.
+        while (len(rows) > 1
+               and len(_snapshot_json(snapshot)) > max_chars):
             rows.pop()
             dropped += 1
         if dropped:
@@ -365,10 +369,21 @@ class AIAnalyst:
         istek_metin += ("\n\nGeçerli bacak adları: "
                         + ", ".join(b["name"] for b in legs))
 
+        # Aritmetiği modele bırakmıyoruz. Ölçüldü: talep kapasiteyi aşınca
+        # model "toplam sınırı aşıyor" deyip herkese **0** yazıyor — tam da
+        # sistemin var olma sebebi olan durumda kesip atıyor. Kaçta kaçını
+        # verebileceğini hazır cümle olarak veriyoruz; model yalnız payları
+        # önceliğe göre oynatıyor. Yapabildiği iş bu.
+        oran = "\n".join(
+            self._ration_line(ad, istek, kap)
+            for ad, istek, kap in (("İndirme", istek_down, kap_down),
+                                   ("Yükleme", istek_up, kap_up))
+            if istek > 0)
+
         user = FLOW_USER.format(
             saat=f"{saat:02d}:00 ({gun})", bacaklar=bacak_metin,
             kap_down=f"{kap_down:.0f}", kap_up=f"{kap_up:.0f}",
-            istekler=istek_metin,
+            istekler=istek_metin, oran=oran,
             istek_down=f"{istek_down:.0f}", istek_up=f"{istek_up:.0f}")
 
         try:
@@ -387,6 +402,19 @@ class AIAnalyst:
                    not in yanitlanan]
         return plan, atlanan, {"rows": rows, "legs": legs,
                                "kap_down": kap_down, "kap_up": kap_up}
+
+    @staticmethod
+    def _ration_line(ad: str, istek: float, kap: float) -> str:
+        """Modele hazır pay cümlesi — yüzdeyi biz hesaplıyoruz."""
+        if kap <= 0:
+            return f"{ad}: kapasite yok."
+        if istek <= kap:
+            return (f"{ad} kapasitesi YETİYOR — herkese istediğinin tamamını "
+                    f"verebilirsin.")
+        p = kap / istek * 100.0
+        return (f"{ad} kapasitesi YETMİYOR. Herkese istediğinin kabaca "
+                f"%{p:.0f}'ini ver, sonra önceliğe göre ayarla. "
+                f"Hiçbirine 0 yazma.")
 
     def _situation(self, metrics: MetricsEngine, topology: Any,
                    alerts: list[Alert] | None,
@@ -418,7 +446,43 @@ class AIAnalyst:
                 etiket.append(f"BOZUK (sağlık %{e.health * 100:.0f})")
             satirlar.append("- " + ", ".join(etiket))
 
-        durum = [
+        # Koşulu modele ÇIKARTTIRMIYORUZ, hazır cümle veriyoruz. Ölçüldü:
+        # bacak listesinde "SAYAÇLI" yazılı olduğu halde model parayı hiç öne
+        # almıyordu (10 rastgele ağda 0/2). Aynı kusur akış katmanında da
+        # vardı ve orada koşulu cümleye çevirmek 4/10'u 9/10 yapmıştı.
+        # Model okuduğunu uygular, çıkarım yapmaz.
+        tikanik = max(st.down_utilization, st.up_utilization) >= 0.80
+        sayacli = [e.dst for e in getattr(topology, "edges", [])
+                   if getattr(e, "kind", "") == "wan" and e.src == "internet"
+                   and e.cost_per_gb > 0]
+        bozuk = [e.dst for e in getattr(topology, "edges", [])
+                 if getattr(e, "kind", "") == "wan" and e.src == "internet"
+                 and e.health < 0.99]
+        kalite_bozuk = st.avg_rtt_ms > 120 or st.retransmit_rate > 0.02
+
+        bayrak = []
+        bayrak.append("- TIKANMA VAR — hat dolu, kimi kısacağına karar vermelisin."
+                      if tikanik else
+                      "- Tıkanma yok — hat rahat.")
+        if sayacli and not tikanik:
+            bayrak.append(f"- SAYAÇLI BACAK VAR ({', '.join(sayacli)}) ve tıkanma "
+                          f"yok → cost_weight \"yuksek\" olmalı.")
+        elif sayacli:
+            bayrak.append(f"- Sayaçlı bacak var ({', '.join(sayacli)}) ama tıkanma "
+                          f"da var → cost_weight \"dusuk\" olmalı.")
+        if bozuk:
+            bayrak.append(f"- BOZUK BACAK VAR ({', '.join(bozuk)}) → "
+                          f"health_weight \"yuksek\" olmalı.")
+        if kalite_bozuk:
+            bayrak.append("- HAT KALİTESİ BOZUK (gecikme/yeniden gönderim yüksek) "
+                          "→ latency_weight \"yuksek\" olmalı.")
+        if tikanik and 8 <= saat < 19:
+            bayrak.append("- MESAİ SAATİNDE TIKANMA → insan bekliyor: sıralamada "
+                          "realtime ve interactive, bulk'un ÖNÜNDE olmalı.")
+        if not tikanik and (saat >= 23 or saat < 8):
+            bayrak.append("- GECE, OFİS BOŞ → sıralamada bulk öne alınabilir.")
+
+        durum = list(bayrak) + [
             f"- indirme hattı doluluğu: %{st.down_utilization * 100:.0f}",
             f"- yükleme hattı doluluğu: %{st.up_utilization * 100:.0f}",
             f"- ortalama gecikme: {st.avg_rtt_ms:.0f} ms "

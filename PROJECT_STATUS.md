@@ -3,7 +3,7 @@
 > **Bu dosya oturumlar arası hafızadır.** Yeni bir oturuma başlarken önce burayı
 > oku, sonra devam et. Bir iş bitince veya bir karar değişince burayı güncelle.
 
-**Son güncelleme:** 2026-08-24
+**Son güncelleme:** 2026-08-25
 **Repo:** https://github.com/OmerArdaZorlu/netpilot
 **Paket adı:** `ntc` (repo adı `netpilot` ile kasıtlı olarak farklı — içeride
 onlarca `from ntc...` import var, değiştirmek gereksiz kırılganlık)
@@ -29,18 +29,20 @@ Simulator → Metrics → (Optimizer ‖ AI Analyst) → Controller → API + Pa
 | Optimizasyon motoru | `ntc/traffic/optimizer.py` | ✅ 5 kural, politika defteri, uyarı soğutma |
 | LLM sağlayıcı | `ntc/ai/provider.py` | ✅ zincir: foundry → ollama → mock |
 | Foundry Local | `ntc/ai/foundry.py` | ✅ 2026-08-24'te gerçek serviste doğrulandı (3 kusur çıktı, düzeltildi) |
-| AI analisti | `ntc/ai/analyst.py` | ✅ snapshot, analiz, soru-cevap, normalizasyon |
+| AI analisti | `ntc/ai/analyst.py` | ✅ snapshot, analiz, soru-cevap, normalizasyon, hedef + akış üretimi |
+| AI akış üretimi | `ntc/ai/flowai.py` | ✅ modelin tahsisi; **20 rastgele mimaride 19'u tam cevap**, kayıp 0.0 Mbps |
 | Kalıcılık | `ntc/storage/db.py` | ✅ SQLite, 5 tablo, 24 saat saklama |
 | Akış topolojisi | `ntc/traffic/topology.py` | ✅ yönlü kapasiteli grafik + tohumlu rastgele ağ üreteci; `link:` buradan türetiliyor |
 | Akış çözücüsü | `ntc/traffic/flowopt.py` | ✅ çok mallı akış LP'si; hedefi artık sabit değil, `flowpolicy` üzerinden geliyor |
+| Trafik sınıflandırma | `ntc/traffic/classify.py` | ✅ katmanlı, gölge modda bağlı; **%97.4 (IP'siz) / %98.3 (eksik IP)**, 15.070 akış |
 | Talep tahmini | `ntc/traffic/demand.py` | ✅ boş saat tepesi + baskı ayrımı; ölçüm hatası 200 → 0 Mbps |
-| Akış politikası | `ntc/traffic/flowpolicy.py` | ✅ çözücünün hedefi + doğrulama kapısı; AI'ın sisteme dokunduğu tek yer |
+| Akış politikası | `ntc/traffic/flowpolicy.py` | ✅ çözücünün hedefi + doğrulama kapısı; **10 rastgele mimaride 9/10** |
 | İnfaz — politika | `ntc/enforce/policy.py` | ✅ cihazdan bağımsız kural nesneleri + onay köprüsü |
 | İnfaz — sürücüler | `ntc/enforce/drivers.py` | ✅ anlat / linux (`tc`) / windows (QoS); **komut metni** doğrulandı, cihaz davranışı doğrulanmadı |
 | İnfaz — uzlaştırıcı | `ntc/enforce/engine.py` | ✅ fark uygulama, gölge modu, kapanışta geri alma |
 | Orkestrasyon | `ntc/controller.py` | ✅ 5 async döngü |
 | API + WebSocket | `ntc/api/server.py` | ✅ |
-| Panel | `ntc/dashboard/index.html` | ⚠️ çalışıyor, **görsel olarak denetlenmedi** |
+| Panel | `ntc/dashboard/index.html` | ✅ görsel denetimden geçti (5 genişlik × 2 tema); 7 kusur bulundu ve düzeltildi |
 | CLI | `ntc/cli.py` | ✅ serve / watch / analyze / ask / doctor |
 
 ### Çalıştırma
@@ -608,6 +610,208 @@ Server 2025 Evaluation (ücretsiz, 180 gün) / Azure VM / Win11 Pro yükseltme.
    birkaç kez sormak (her turda kalan kapasiteyi bildirerek). Payı %38'in
    üzerine çıkarabilir, daha büyük model gerektirmez.
 
+4l. **🔴→✅ AI katmanları tek elle yazılmış ağda sınanmıştı** *(2026-08-25)*
+
+   Kullanıcı sordu: *"sen tek düz bir topolojide mi test ediyon hâlâ?"* —
+   çözücü için hayır, **AI için evet**, ve bu tam da baştan beri istenenin
+   tersiydi.
+
+   | katman | eskiden nerede ölçülmüştü |
+   |---|---|
+   | çözücü optimalliği | 15 rastgele ağ ✅ |
+   | tüm zincir | 12 rastgele ağ ✅ |
+   | **AI akış üretimi** | tek elle yazılmış ağ ❌ |
+   | **AI hedef seçimi** | tek elle yazılmış ağ ❌ |
+   | **taban ölçeği** | 5 hız oranı, hepsi `sites=1, egresses=1` ❌ |
+
+   Yani %38 pay, 0 kayıp, 2/4 doğruluk — hepsi tek bir ağdan geliyordu.
+
+   #### Ölçüm 1: taban ölçeği şekle karşı — geçti
+
+   12 farklı şekil (1–5 site, 1–5 çıkış, 50/50'den 2000/200'e): yön başına
+   ölçek ve `background` tabanı **12/12** doğru. `t_floors_shape.py`.
+   Taban düzeltmesi (4i) şekilden bağımsız çalışıyor.
+
+   #### Ölçüm 2: AI akış üretimi 10 rastgele ağda — 4/10 ile başladı
+
+   İlk tablo aldatıcıydı: *tahsis sayısı* saymıştım, oysa modelin verdiği
+   tahsislerin çoğu **0.0 Mbps**'ti. Sıfırdan büyük tahsisleri sayınca
+   gerçek sayı **4/10**. Tekrarlı koşu (3 tur) arızanın **rastgele değil
+   yapısal** olduğunu gösterdi: aynı ağ hep aynı çöküyor.
+
+   Ham çıktıya bakınca iki ayrı sebep çıktı:
+
+   **(a) Şema sapması — bizim hatamız.** Model bazı ağlarda üst düzeyde bir
+   **liste** döndürüyor, her elemanın içine kendi `allocations` alanını
+   koyuyor. İçerik doğruydu — 10 satır, makul sayılar, bacaklar seçilmiş —
+   ve `validate()` `raw.get("allocations")` bulamadığı için **tümünü
+   reddediyordu.** Modelin iyi cevabını biz çöpe atıyorduk.
+   → `flowai._normalize()` üç biçimi tek biçime indiriyor.
+
+   **(b) Tıkanmada sıfırlama — modelin aritmetiği.** Talep kapasiteyi aşınca
+   model *"toplam sınırı aşıyor"* deyip herkese **0** yazıyor. Payı
+   bölüştürmek yerine reddediyor — tam da sistemin var olma sebebi olan
+   durumda kesip atıyor.
+   → İstem: "ASLA 0 YAZMA", ve yüzdeyi **biz** hesaplayıp hazır cümle olarak
+   veriyoruz ("herkese kabaca %55'ini ver, sonra önceliğe göre ayarla").
+
+   **(c) Düzeltmenin yan etkisi — ölçümde yakalandı.** "%83'ünü ver" deyince
+   model çarpmayı yapamayıp JSON'un içine **ifadeyi** yazdı:
+   `"grant_mbps": 229.7 * 0.83`. Niyet doğru, aritmetik yok; JSON geçersiz.
+   → `provider._collapse_arithmetic()` yalnız **değer konumundaki**
+   sayı-işlem-sayı üçlüsünü sonuca indiriyor. Dize değerleri tırnakla
+   başladığı için desene takılmıyor.
+
+   | | düzeltme öncesi | sonrası |
+   |---|---|---|
+   | 8+ anlamlı tahsis veren ağ | 4/10 | **9/10** |
+   | ortalama AI payı | %49 | **%66** |
+   | kayıp | 0.0 | **0.0** |
+
+   **Uydurma kontrolü:** düzeltmeler bu 10 tohuma uyduruldu mu diye **hiç
+   görülmemiş 10 ağda** yeniden ölçüldü (2–5 site, 1–5 çıkış, 60/6'dan
+   1500/150'ye): **10/10 geçerli, 10/10 tam cevap, ortalama pay %71,
+   toplam kayıp 0.0 Mbps.**
+
+   ⚠️ Kalan: bir ağda (t207) model 10 satırın 5'ini yanıtlıyor ve duruyor.
+   Bilinen erken-durma kusuru; kalan 5 talep LP'ye gidiyor, kayıp yok.
+
+   #### Ölçüm 3: AI hedef seçimi 10 rastgele ağda — 5/10 → 9/10
+
+   Her durum farklı bir rastgele mimaride, doğru cevap önceden yazılı:
+   sayaçlı hat ×2, bozuk bacak ×2, gece yedekleme ×2, mesai tıkanması ×2,
+   yüksek gecikme ×2.
+
+   *İlk turda iki hatayı kendi testimde yaptım ve düzelttim:*
+   `FlowPolicy` doğrulamadan sonra kategoriyi **sayıya** çeviriyor, ben
+   metinle karşılaştırmıştım; ve sayaçlı senaryoları %88 doluluk ile
+   kurmuştum, oysa istemimizin kendi kuralı "sayaçlı hat varsa **ve tıkanma
+   yoksa** parayı öne al" diyor — model kurala uymuştu, test yanlıştı.
+
+   Düzeltilmiş ölçüm **5/10**. İki arıza kümesi: sayaçlı 0/2 (bilinen borç,
+   rastgele ağda da doğrulandı) ve **mesai tıkanması 0/2** — model iş
+   saatinde tıkanıkken `streaming`/`bulk`'u realtime'ın önüne alıyordu, bu
+   yeni ve daha zararlı.
+
+   **Düzeltme — koşulu modele çıkarttırmıyoruz, hazır cümle veriyoruz.**
+   `_situation()` artık durum özetinin başına bayrak satırları koyuyor:
+
+   ```
+   - TIKANMA VAR — hat dolu, kimi kısacağına karar vermelisin.
+   - SAYAÇLI BACAK VAR (cikis-1) ve tıkanma yok → cost_weight "yuksek" olmalı.
+   - MESAİ SAATİNDE TIKANMA → realtime ve interactive, bulk'un ÖNÜNDE olmalı.
+   ```
+
+   Bacak listesinde "SAYAÇLI" zaten yazılıydı ve model görmüyordu. Okuduğunu
+   uyguluyor, çıkarım yapmıyor. **5/10 → 9/10.**
+
+   Kalan tek arıza: bir ağda model sıralamadan `realtime`'ı düşürdü →
+   doğrulama kapısı **reddetti**, mevcut hedef korundu, ağa hiçbir şey
+   gitmedi. Yanlış cevap ama zararsız — kapının çalıştığının kanıtı.
+
+   #### Genel ders
+
+   Her üç düzeltme de aynı biçimde: **modelden çıkarım ya da aritmetik
+   istediğimiz her yerde düşüyor, hazır cümle verdiğimiz her yerde
+   çalışıyor.** Aynı kalıp daha önce sayı→kategori geçişinde (4h) ve
+   ad→kimlik geçişinde (4j) de işe yaramıştı. Yeni bir AI özelliği eklerken
+   önce şunu sor: *model burada hesap mı yapmak zorunda?* Cevap evetse
+   hesabı Python'a al.
+
+   Gerileme: `t_flowopt`, `t_enforce`, `t_enforce_scope`, `t_floors`,
+   `t_floors_shape`, `t_demand`, `t_random_topo`, `t_json` — hepsi geçti.
+
+4m. **✅ Ölçülmemiş ne varsa ölçüldü** *(2026-08-25)*
+
+   4l'den sonra açıkta kalan tek şey "hiç ölçülmemiş sabitler"di. Hepsi
+   rastgele mimaride sınandı — `t_sabitler.py`, `t_zincir.py`, `t_api.py`.
+
+   | ne | kapsam | sonuç |
+   |---|---|---|
+   | Ağırlıklar (gecikme/para/sağlık) | 27 birleşim × 8 ağ = **216** | en kötü oran **1.0000** — hiçbir ağırlık trafik attırmadı |
+   | Sınıf sırası | 20 permütasyon × 8 ağ = **640 ikili** | 0 ihlal |
+   | Taban profilleri | 4 profil × 8 ağ × 5 sınıf × 2 yön = **320** | 0 ihlal |
+   | Talep tahmini sabitleri | 8 senaryo + şişirme tavanı | 0 ihlal |
+   | Belirlenimcilik | 8 ağ × 5 koşu | tek sonuç |
+   | Talepten fazla verme / LAN-WAN | 8 ağ | 0 ihlal |
+   | Tam zincir (AI dahil) | 8 ağ | kayıp 0.0, sapma ≤%2.2 |
+   | API uçları, canlı | 12 uç | hepsi 200 |
+
+   **Ölçüm hataları kendi tarafımda çıktı, üç kez.** Sabitlerin hepsi
+   doğruydu; yanlış olan testlerdi ve her biri bulunması gereken bir şey
+   öğretti:
+
+   - **Max-flow hakemi sahte kapasite üretiyordu.** Hedef düğümde korunum
+     uygulanmadığı için akış `access-1 → dist-1 → access-1` döngüsüne
+     giriyor ve 200 Mbps'lik ağda "2500 Mbps tavan" çıkıyordu. Hedeften
+     çıkan ve kaynağa giren kenarlar kapatılmalı. *(Aynı kusur
+     `t_optimallik.py`'de de olabilir — orada yön ters olduğu için
+     tetiklenmiyor, ama hakem kodu ortak değil.)*
+   - **Tabanı nominal kapasiteyle karşılaştırdım.** Bozuk bacak
+     `effective_mbps`'i düşürüyor; var olmayan kapasiteden garanti
+     verilemez. 59 sahte ihlal üretti, oranların hepsi tam 0.781 çıkınca
+     (bozuk bacağın payı) anlaşıldı. Taban **etkin** kapasiteye göre
+     ölçülür.
+   - **`PathAssigner` tek çıkışlı ağda boş dönüyor** ve bu doğru davranış:
+     seçilecek yol yok, `update()` bu akışları bilerek tabloya almıyor.
+
+   **Yol atayıcı ayrıca ölçüldü:** 2000 akış anahtarı ile ampirik dağılım
+   planın kenar kullanımına uyuyor (en büyük sapma **%2.2**, tolerans %5),
+   ve aynı akış anahtarı hep aynı çıkışa düşüyor (yapışkanlık).
+
+   ⚠️ **Canlı koşuda görülen yeni kusur:** danışma yolunda model hedef
+   alanına birleşik ad yazıyor — `'Cam-entrance ve cam-parking'` — ve
+   normalizasyon bunları düşürüyor. Akış yolunu etkilemiyor (orada kimlikle
+   cevap veriyor), yalnız öneri listesini zayıflatıyor. Kaydedildi, açık.
+
+4n. **✅ Panel görsel denetimi — 7 kusur bulundu** *(2026-08-25)*
+
+   Panel bugüne kadar "çalışıyor ama görsel olarak denetlenmedi" diye
+   duruyordu. Denetim göz kararıyla değil **ölçerek** yapıldı: panele bir
+   ölçüm betiği enjekte eden geçici bir yol (`/denetim`) açıldı, headless
+   Edge ile 390 / 768 / 1024 / 1440 / 1920 px genişliklerde ve iki temada
+   koşturuldu. Ölçülen: yatay taşma, viewport dışına çıkan öğeler, kesilen
+   metin, dokunma hedefi boyutu, çökmüş çubuk dolgusu, boş ama yer kaplayan
+   kartlar.
+
+   | # | kusur | ölçüm |
+   |---|---|---|
+   | 1 | **Sayfa yana kayıyordu** | 390px'de **360px**, 768'de 114px, 1024'te 16px yatay taşma |
+   | 2 | **Bütün çubuk dolguları görünmezdi** | `.bar` genişliği doluydu, **yüksekliği 0** |
+   | 3 | Boş kartlar dev yer kaplıyordu | "Uyarılar" kartı 40 karakterle **632px** |
+   | 4 | Dokunma hedefleri küçüktü | 10 düğmenin hepsi **30px** yükseklikte |
+   | 5 | Grafik ekseni çakışıyordu | "Mbps" başlığı en üst eksen değerinin üstünde |
+   | 6 | Dar ekranda kenar boşluğu fazlaydı | 390px viewport'ta 48px yatay dolgu |
+   | 7 | Sınıflandırma kartı yoktu | yeni katmanın panelde karşılığı yoktu |
+
+   **1 — yatay taşma.** `.flow-grid` ızgara öğelerinde `min-width: 0` yoktu.
+   Izgara öğesinin varsayılan `min-width: auto` değeri, içeriğin doğal en
+   küçük genişliğinin altına inmesini engelliyor; `.cmds` `white-space: pre`
+   olduğu için o doğal genişlik **en uzun komut satırı** kadar. Sütun
+   küçülmeyince tüm sayfa kayıyordu. `.cmds` üzerindeki `overflow-x: auto`
+   yetmiyor — kısıtlanması gereken kap, öğenin kendisi.
+
+   **2 — en sinsi olanı.** `.classrow .bar` bir `<span>`, yani satır içi
+   eleman, ve satır içi elemanda `height: 100%` hiçbir şey yapmaz. Kutu
+   sıfır yüksekliğe çöküyordu. Panelde bu sınıfı kullanan **bütün** çubuklar
+   bomboştu — "Trafik sınıfı dağılımı" dahil — ve kimse fark etmemişti,
+   çünkü **boş bir çubuk "değer düşük" diye okunuyor.** Sessiz yalan:
+   gerçekte 12.1 Mbps olan etkileşimli trafik, bakan kişiye sıfır
+   görünüyordu. Yalnız gözle bakmak bunu yakalamazdı; denetim betiğine
+   "genişliği var ama yüksekliği yok" kontrolü eklendi ki geri gelemesin.
+
+   **Sonuç:** üç genişlikte de **0 yatay taşma, 0 taşan öğe, 0 kesilen
+   metin, 0 küçük hedef, 0 çökmüş dolgu, 0 boş dev kart.**
+
+   Panele **Trafik sınıflandırma kartı** eklendi. Kart genel bir doğruluk
+   yüzdesi göstermekle yetinmiyor, **katman başına pay ve isabet** veriyor:
+   trafiğin çoğu tek sınıflı portlardan gelir ve orada isabet zaten %100'dür,
+   asıl soru belirsiz olanda ne olduğudur. Şekil katmanının payı büyük ve
+   isabeti düşükse yüksek bir genel yüzde hiçbir şey ifade etmiyor demektir.
+
+   ⚠️ **Denetlenmeyen:** renk kontrast oranları (WCAG) ölçülmedi; klavye ile
+   gezinme ve odak görünürlüğü denenmedi; ekran okuyucu denenmedi.
+
 ### Tasarımı konuşuldu, kodu yazılmadı
 
 4c. **Cache kaydı boşluğu**
@@ -676,11 +880,88 @@ Server 2025 Evaluation (ücretsiz, 180 gün) / Azure VM / Win11 Pro yükseltme.
 
    API: `/api/flow/demand` — hangi cihazın boş saatte ne çektiği.
 
-4f. **Trafik sınıflandırma — DPI'sız katmanlı**
+4f. **✅ Trafik sınıflandırma — DPI'sız katmanlı** *(2026-08-25)*
 
-   Sıra: süreç adı (Sysmon Event 3) → hedef IP aralığı → port → akış şekli
-   → bilinmiyorsa "interactive". Doğruluğu simülatörün kendi etiketlerine
-   karşı ölçülebilir. Kodu yazılmadı.
+   `ntc/traffic/classify.py`. Sistemin bütün öncelik mantığı
+   `traffic_class`'a dayanıyor; simülasyonda o etiket hazır geliyor, gerçek
+   ağda gelmiyor. Bu katman olmadan geri kalan her şey doğru cevabı yanlış
+   soruya veriyor.
+
+   **Katman sırası — ölçümle düzeltildi:**
+
+   ```
+   1. süreç adı (Sysmon Event 3)
+   2. TEK SINIFLI PORT          ← ilk sürümde 3. sıradaydı, yanlıştı
+   3. hedef IP bloğu            ← yalnız BELİRSİZ portta
+   4. akış şekli
+   5. varsayılan: interactive
+   ```
+
+   *İlk sürümde IP portun önündeydi ve ölçüm bunu yakaladı:* DNS `udp/53`'ten
+   gidiyor ama çözücü bir bulut adresinde durduğu için IP katmanı onu
+   `https-web` sayıyordu. **Genel doğruluk %72.4 → %64.2, yani IP katmanı
+   eklemek sistemi kötüleştiriyordu.** Sebep basit: `udp/53`'e giden akış
+   DNS'tir, hedefin kim olduğundan bağımsız. IP'nin yeri portun cevap
+   veremediği yer.
+
+   **Belirsiz port tablosu elle yazılmıyor,** katalogdan türetiliyor.
+   `tcp/443` = 6 uygulama, 4 sınıf (`https-web`, `netflix`, `youtube`,
+   `windows-update`, `cloud-sync`, `os-telemetry`). Elle yazılsa katalogla
+   sessizce ayrışır ve ayrışma tam da yanlış sınıflandırma demek olurdu.
+
+   **Tarayıcılar bilerek eşlenmiyor.** `chrome.exe → https-web` yazmak,
+   tarayıcıdan izlenen Netflix'i `interactive` yapardı — bir video akışına
+   en yüksek etkileşimli önceliği vermek. Tarayıcı `svchost` gibi konak
+   süreç; ne yaptığını IP ve şekil söyler. IP katmanının varlık sebebi bu.
+
+   **"Tek yönlü akış → streaming" kuralı SÜPÜRÜLDÜ ve kaldırıldı.**
+   Sezgisel olarak doğru görünüyordu (video indirir, yüklemez) ama her
+   eşikte zarar veriyordu — `https-web` de tek yönlü olabiliyor:
+
+   | yukarı/aşağı eşiği | IP yokken | IP varken |
+   |---|---|---|
+   | 0.00 (kural kapalı) | **%98.3** | **%99.8** |
+   | 0.01 | %98.0 | %99.2 |
+   | 0.02 | %97.0 | %97.6 |
+   | 0.05 | %92.9 | %92.9 |
+
+   `SHAPE_STREAM_DOWN_BPS` de süpürüldü: 6 Mbps optimumda çıktı — tam
+   olarak katalogdaki `https-web` tavanı.
+
+   **Simülatörün bir kusuru bu iş sırasında bulundu ve düzeltildi.** Hedef
+   IP'yi **uygulamadan bağımsız** ortak bir havuzdan seçiyordu — yani
+   Netflix CDN'ine giden DNS akışı üretiyordu. Gerçek ağda bu olmaz ve IP
+   katmanını ölçülemez kılıyordu (isabet %15.6). `catalog.APP_ENDPOINTS`
+   ile uygulama başına gerçekçi blok verildi.
+
+   **Doğruluk — 8 simülasyon tohumu, 15.070 akış:**
+
+   | koşul | doğruluk | ne demek |
+   |---|---|---|
+   | **A. IP yok (port + şekil)** | **%97.4** | **gerçek taban** — hiçbir tablo kendini doğrulamıyor |
+   | **D. IP tablosu eksik (1/3)** | **%98.3** | **gerçek dünyaya en yakın** — blok listeleri hep eksiktir |
+   | B. IP tam | %100.0 | üst sınır, kendi tablomuza dayanıyor |
+   | C. IP tam + süreç | %100.0 | tavan |
+
+   ⚠️ **B ve C bir şey kanıtlamaz.** `classify.IP_RANGES` ile
+   `catalog.APP_ENDPOINTS` aynı gerçeği anlatan iki tablo ve ikisini de biz
+   yazdık; "IP açıkken %100" kendi tablomuzu kendi tablomuzla doğrulamaktır.
+   **Anlamlı sayılar A ve D.**
+
+   ⚠️ **Gerçek ağ bu sayının altında kalır.** Ölçüm simülatöre karşı ve
+   simülatörün uygulamaları tam olarak katalogdakiler. Gerçek trafikte
+   katalogda olmayan uygulamalar var; onlar varsayılana (`interactive`)
+   düşer.
+
+   **Sisteme gölge modda bağlandı** (`ClassifyAudit`, `classify.mode`
+   varsayılan `golge`). Simülasyonda etiket zaten doğru; onu %97'lik bir
+   tahminle ezmek düpedüz gerileme olurdu. Gölgede karar veriliyor,
+   karşılaştırılıyor, akışa dokunulmuyor. `mode: canli` sınıfı gerçekten
+   yazar — canlı yakalamada tek kaynak o.
+
+   API: `/api/classify` — uyum oranı, **katman başına pay ve isabet**,
+   belirsiz portlar, uyuşmazlık örnekleri. Katman dökümü olmadan
+   "sınıflandırma çalışıyor" ölçülemez bir iddia olurdu.
 
 ### Lab gerektiriyor
 

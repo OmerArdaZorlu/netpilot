@@ -84,6 +84,36 @@ def _scan_object(text: str) -> dict[str, Any] | None:
     return None
 
 
+_ARITMETIK = re.compile(r"(:[ ]*)(-?[0-9]+(?:[.][0-9]+)?)[ ]*([*/])[ ]*(-?[0-9]+(?:[.][0-9]+)?)")
+
+
+def _collapse_arithmetic(text: str) -> str:
+    """`"grant_mbps": 229.7 * 0.83` gibi ifadeleri sonuca indirir.
+
+    **Neden var:** modele "herkese kabaca %83'ünü ver" dendiğinde phi-4-mini
+    niyeti doğru anlıyor ama çarpmayı yapamıyor ve JSON'un içine **ifadeyi**
+    yazıyor. Sonuç geçersiz JSON: iyi bir cevap tamamen kayboluyordu
+    (ölçüldü: 10 rastgele ağın 1'i yalnız bu yüzden düşüyordu).
+
+    Yalnız **değer konumundaki** (iki nokta üst üsteden hemen sonra gelen)
+    sayı-işlem-sayı üçlüsü işleniyor. Dize değerleri tırnakla başladığı için
+    desene takılmıyor; modelin gerekçe cümlesindeki `*` işaretine
+    dokunulmuyor.
+    """
+    def bir(m: "re.Match[str]") -> str:
+        onek, a, op, b = m.group(1), float(m.group(2)), m.group(3), float(m.group(4))
+        if op == "/" and b == 0:
+            return m.group(0)
+        return f"{onek}{round(a * b if op == '*' else a / b, 3)}"
+
+    for _ in range(4):          # a * b * c gibi zincirler için birkaç tur
+        yeni = _ARITMETIK.sub(bir, text)
+        if yeni == text:
+            break
+        text = yeni
+    return text
+
+
 def extract_json(raw: str) -> dict[str, Any]:
     """Metnin içinden ilk geçerli JSON nesnesini söker.
 
@@ -93,6 +123,7 @@ def extract_json(raw: str) -> dict[str, Any]:
     text = raw.strip()
     if not text:
         raise ValueError("model boş yanıt döndürdü")
+    text = _collapse_arithmetic(text)
 
     # Kod bloklarını sırayla dene. Tek blok yakalayıp `text`'in üstüne yazmak
     # üretimde kırıldı: model bozuk bir blok açıp (```ple ...) ardından doğru

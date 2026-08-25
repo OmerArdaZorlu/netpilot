@@ -19,7 +19,7 @@ from ..core.models import (
     new_id,
     now,
 )
-from .catalog import APPS, PROFILES, AppSpec, DeviceProfile
+from .catalog import APP_ENDPOINTS, GENERIC_ENDPOINTS, APPS, PROFILES, AppSpec, DeviceProfile
 
 LAN_PREFIX = "10.10.0."
 EXTERNAL_POOL = [
@@ -211,7 +211,12 @@ class TrafficSimulator:
             dst_ip = self.rng.choice(LAN_SERVERS)
             direction = Direction.LATERAL
         else:
-            dst_ip = self.rng.choice(EXTERNAL_POOL)
+            # Hedef, uygulamanın kendi bloğundan. Ortak havuzdan rastgele
+            # seçmek gerçek ağda olmayan bir şeydi (Netflix CDN'ine giden
+            # DNS akışı) ve sınıflandırıcının IP katmanını ölçülemez
+            # kılıyordu — ölçüldü: isabet %15.6 → %100.
+            dst_ip = self.rng.choice(
+                APP_ENDPOINTS.get(app.name) or GENERIC_ENDPOINTS)
             direction = Direction.INBOUND if down >= up else Direction.OUTBOUND
 
         return Flow(

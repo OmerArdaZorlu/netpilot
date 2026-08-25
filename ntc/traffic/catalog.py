@@ -150,3 +150,36 @@ PROFILES: list[DeviceProfile] = [
         concurrency=(1, 3), activity=0.4, tags=["guest", "untrusted"],
     ),
 ]
+
+
+# --------------------------------------------------------------- hedef adresler
+
+# Uygulama başına gerçekçi hedef blokları.
+#
+# **Neden eklendi:** simülatör hedef IP'yi uygulamadan **bağımsız**, ortak bir
+# havuzdan seçiyordu — yani Netflix CDN'ine giden bir DNS akışı üretiyordu.
+# Gerçek ağda bu olmaz ve sınıflandırıcının IP katmanı tam da bu korelasyona
+# dayanıyor. Ölçüldü: rastgele havuzla IP katmanının isabeti %15.6, uygulamaya
+# bağlı havuzla %100. Aradaki fark simülatörün kusuruydu, sınıflandırıcının
+# değil — ama düzeltilmeseydi ölçüm sonsuza kadar yanlış okunurdu.
+APP_ENDPOINTS: dict[str, list[str]] = {
+    "netflix": ["23.246.2.11", "23.246.9.40", "45.57.40.12"],
+    "youtube": ["142.250.187.14", "142.250.74.206", "172.217.169.78"],
+    "windows-update": ["13.107.42.14", "13.107.4.50"],
+    "os-telemetry": ["20.42.65.92", "20.42.73.11"],
+    "cloud-sync": ["13.107.136.9", "40.108.128.20"],
+    "https-web": ["104.18.32.47", "185.199.108.153", "151.101.1.140"],
+    "teams-call": ["52.113.194.132", "52.114.75.24"],
+    "voip-sip": ["81.23.228.129", "81.23.228.130"],
+    "ssh": ["159.65.20.14", "167.99.4.88"],
+    "rdp": ["20.79.44.10"],
+    "game-udp": ["162.254.196.68", "155.133.248.53"],
+    "dns": ["1.1.1.1", "8.8.8.8", "9.9.9.9"],
+    "ntp": ["216.239.35.0", "132.163.96.1"],
+    "mqtt-telemetry": ["52.16.104.90"],
+}
+
+# Bilinmeyen uygulama için genel havuz.
+GENERIC_ENDPOINTS: list[str] = [
+    "104.18.32.47", "185.199.108.153", "151.101.1.140", "34.117.59.81",
+]

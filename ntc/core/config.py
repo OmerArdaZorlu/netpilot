@@ -142,6 +142,30 @@ class LoggingConfig:
 
 
 @dataclass
+class ClassifyConfig:
+    """Trafik sınıflandırma — akışın sınıfını **biz** üretiyoruz.
+
+    Simülasyonda etiket zaten doğru geliyor; orada sınıflandırıcıyı devreye
+    almak %100'ü %97.7'ye düşürmek olurdu. O yüzden varsayılan **gölge**:
+    sınıflandırıcı her akışı okuyor, kararını simülatörün etiketiyle
+    karşılaştırıyor, ama **hiçbir şeyi değiştirmiyor**. Uyum oranı
+    `/api/classify` ucunda görünüyor.
+
+    `mode: "canli"` sınıfı gerçekten yazar — canlı yakalamada etiket
+    olmadığı için orada tek kaynak bu.
+    """
+
+    enabled: bool = True
+    mode: str = "golge"             # golge | canli
+    # Sysmon Event 3 süreç adını veriyor ve en sağlam katman o. Kapalıyken
+    # sistem yalnız ağ görünümüne bakıyor — ölçüldü: %100 yerine %97.7.
+    use_process: bool = True
+    # Uyum örneklemesi kaç akışta bir tutulacak. Hepsini saklamak gereksiz;
+    # oran birkaç yüz örnekte oturuyor.
+    sample_size: int = 500
+
+
+@dataclass
 class Config:
     mode: str = "simulation"
     link: LinkConfig = field(default_factory=LinkConfig)
@@ -153,6 +177,7 @@ class Config:
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     flow: FlowConfig = field(default_factory=FlowConfig)
     enforce: EnforceConfig = field(default_factory=EnforceConfig)
+    classify: ClassifyConfig = field(default_factory=ClassifyConfig)
     # Topoloji düz bir dataclass değil (kenar listesi), o yüzden ham
     # haliyle taşınıp `Topology.from_config` tarafından ayrıştırılıyor.
     topology_raw: dict[str, Any] | None = None
@@ -198,6 +223,7 @@ _NESTED = {
     "logging": LoggingConfig,
     "flow": FlowConfig,
     "enforce": EnforceConfig,
+    "classify": ClassifyConfig,
 }
 
 

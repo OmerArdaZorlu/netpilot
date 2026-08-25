@@ -44,6 +44,7 @@ from .enforce import (
     build_driver,
     policies_from_plan,
 )
+from .traffic.classify import ClassifyAudit
 from .traffic.demand import DemandEstimator
 from .traffic.flowpolicy import DEFAULT_POLICY, FlowPolicy
 from .traffic.optimizer import TrafficOptimizer
@@ -96,6 +97,9 @@ class Controller:
         # Talep tahmini — doygun hatta ölçülen hız zaten tavandır ve onu
         # "talep" saymak sistemi tam da tıkanma anında körleştiriyordu.
         self.demand_estimator = DemandEstimator()
+        # Trafik sınıflandırma. Varsayılan gölge: karar veriyor ama
+        # yazmıyor; uyum oranı `/api/classify` ucunda ölçülüyor.
+        self.classifier = ClassifyAudit(self.cfg.classify)
         self.flow_plan: FlowPlan | None = None
         # Akışları planın oranlarına göre çıkışlara dağıtır.
         self.path_assigner = PathAssigner()
@@ -206,6 +210,7 @@ class Controller:
         while self._running:
             try:
                 flows = self.simulator.tick(dt)
+                self.classifier.process(flows)
                 self._stamp_paths(flows)
                 self.metrics.add(flows)
                 stats = self.metrics.link_stats()

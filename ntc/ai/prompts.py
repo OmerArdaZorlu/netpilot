@@ -176,6 +176,10 @@ Kural 4 — Saat ve durum önemli. Gece ofis boşsa yedeklemeye geniş ver, gör
 
 Kural 5 — Bacak seç. Birden çok bacak varsa her isteğe bir bacak yaz. Bozuk bacaktan kaçın. Sayaçlı bacağı ancak ücretsiz bacak dolduysa kullan.
 
+Kural 6 — ASLA 0 YAZMA. Kapasite yetmiyor diye bir isteğe 0 vermek o cihazı tamamen keser; istenen bu değil. Toplam istek kapasiteden büyükse herkesin payını KÜÇÜLT, kimseyi sıfırlama. Sana kaçta kaçını verebileceğin hazır söyleniyor — onu başlangıç al, sonra önceliğe göre kimini biraz artır kimini biraz azalt.
+
+Kural 7 — Hesap yapma. Toplamları biz hesapladık ve sana yazdık. Sen yalnız payları dağıt.
+
 Çıktı şeması:
 {
   "situation": "durumu adlandıran 2-4 kelime",
@@ -203,5 +207,7 @@ TOPLAM KAPASİTE:
 {istekler}
 
 Toplam istenen: indirme {istek_down} Mbps, yükleme {istek_up} Mbps
+
+{oran}
 
 Her isteğe ne kadar vereceğini yaz. İndirme verdiklerinin toplamı {kap_down} Mbps'i, yükleme verdiklerinin toplamı {kap_up} Mbps'i geçmesin."""
