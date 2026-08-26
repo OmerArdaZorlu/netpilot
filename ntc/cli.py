@@ -176,8 +176,13 @@ async def cmd_watch(args) -> int:
     controller = Controller(cfg)
     await controller.start()
     if args.scenario:
-        controller.simulator.trigger(args.scenario, duration=args.duration)
-        console.print(f"[cyan]senaryo tetiklendi: {args.scenario}[/]")
+        src = controller.scenario_source
+        if src is None:
+            console.print(f"[yellow]senaryolar bu kaynakta yok "
+                          f"(kaynak: {controller.source.name}) — atlandı[/]")
+        else:
+            src.trigger(args.scenario, duration=args.duration)
+            console.print(f"[cyan]senaryo tetiklendi: {args.scenario}[/]")
     try:
         with Live(_watch_table(controller), console=console,
                   refresh_per_second=2, screen=False) as live:

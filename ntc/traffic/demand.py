@@ -51,7 +51,7 @@ tepesiyle başkalarının payını çalardı.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 # Tepe değerin tamamen değersizleşme süresi. 24 saat, `db.py`'nin sakladığı

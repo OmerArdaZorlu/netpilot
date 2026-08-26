@@ -3,7 +3,7 @@
 > **Bu dosya oturumlar arası hafızadır.** Yeni bir oturuma başlarken önce burayı
 > oku, sonra devam et. Bir iş bitince veya bir karar değişince burayı güncelle.
 
-**Son güncelleme:** 2026-08-25
+**Son güncelleme:** 2026-08-26
 **Repo:** https://github.com/OmerArdaZorlu/netpilot
 **Paket adı:** `ntc` (repo adı `netpilot` ile kasıtlı olarak farklı — içeride
 onlarca `from ntc...` import var, değiştirmek gereksiz kırılganlık)
@@ -15,7 +15,8 @@ onlarca `from ntc...` import var, değiştirmek gereksiz kırılganlık)
 **Faz 1 tamamlandı ve çalışıyor:** trafik izleme + optimizasyon çekirdeği.
 
 ```
-Simulator → Metrics → (Optimizer ‖ AI Analyst) → Controller → API + Panel
+FlowSource → Metrics → (Optimizer ‖ AI Analyst) → Controller → API + Panel
+(kaynak: simulator | live —> Faz 2)
 ```
 
 | Modül | Dosya | Durum |
@@ -24,6 +25,7 @@ Simulator → Metrics → (Optimizer ‖ AI Analyst) → Controller → API + Pa
 | Ortak tipler | `ntc/core/models.py` | ✅ Flow, Device, Alert, Action, LinkStats |
 | Olay yolu | `ntc/core/bus.py` | ✅ async pub/sub |
 | Uygulama/cihaz katalogu | `ntc/traffic/catalog.py` | ✅ 16 uygulama, 10 cihaz profili |
+| Akış kaynağı | `ntc/traffic/source.py` | ✅ `FlowSource` protokolü; `mode` kaynağı gerçekten seçiyor, bilinmeyende hata veriyor |
 | Trafik üreteci | `ntc/traffic/simulator.py` | ✅ 6 senaryo tetiklenebilir |
 | Metrikler | `ntc/traffic/metrics.py` | ✅ kayan pencere, WAN/LAN ayrı |
 | Optimizasyon motoru | `ntc/traffic/optimizer.py` | ✅ 5 kural, politika defteri, uyarı soğutma |
@@ -42,8 +44,9 @@ Simulator → Metrics → (Optimizer ‖ AI Analyst) → Controller → API + Pa
 | İnfaz — uzlaştırıcı | `ntc/enforce/engine.py` | ✅ fark uygulama, gölge modu, kapanışta geri alma |
 | Orkestrasyon | `ntc/controller.py` | ✅ 5 async döngü |
 | API + WebSocket | `ntc/api/server.py` | ✅ |
-| Panel | `ntc/dashboard/index.html` | ✅ görsel + erişilebilirlik denetiminden geçti; 12 kusur bulundu ve düzeltildi |
+| Panel | `ntc/dashboard/index.html` | ✅ görsel + erişilebilirlik + renk körlüğü denetiminden geçti (12 kusur düzeltildi); 2026-08-26'da gerçek `serve` üzerinde uçtan uca çalıştırıldı |
 | CLI | `ntc/cli.py` | ✅ serve / watch / analyze / ask / doctor |
+| Testler | `tests/` (45 dosya) | ✅ depoya alındı; `python tests/kos.py` → 30/30 |
 
 ### Çalıştırma
 
@@ -61,6 +64,9 @@ python -m ntc serve       # panel: http://127.0.0.1:8080
 - Uyarı tekrarı 90 sn soğuma ile bastırılıyor
 - Sağlayıcı zinciri: hiçbiri kurulu değilken gerekçeli şekilde mock'a düşüyor
 - Renk paleti CVD doğrulayıcısından açık+koyu temada geçti
+- Panel canlı (2026-08-26): `/` ve `/api/status` 200, 0 JS hatası, 16/16 kart
+  dolu; tıkanma senaryosu doluluğu %27 → %55/%72'ye, talebi 135 → 552 Mbps'e
+  taşıdı, 4 darboğaz çıktı ve senaryo bitince söndü
 - Foundry Local uçtan uca (2026-08-24): `doctor` → sağlayıcı bağlanıyor,
   `analyze` → gerçek `/v1/chat/completions` yanıtı. Soğuk yol (model bellekte
   değilken) 43 sn, sıcak koşu 25-27 sn. Tembel yükleme ve çıkarım kilidi
@@ -1013,6 +1019,142 @@ Server 2025 Evaluation (ücretsiz, 180 gün) / Azure VM / Win11 Pro yükseltme.
    CVD + kimlik kısıtlarını aynı anda sağlamalı. Metin yedeği olduğu için
    acil değil; yapılırsa aynı arama yöntemiyle yapılmalı.
 
+4t. **✅ Panel gerçek üründe uçtan uca çalıştırıldı** *(2026-08-26)*
+
+   Şimdiye kadarki panel denetimleri (4n, 4p, 4s) **enjekte edilmiş kopyalar**
+   üzerinde koşuyordu (`/denetim`, `/a11y`). Bu, ölçtüğümüz şeyin kullanıcının
+   açtığı sayfa olduğunu kanıtlamıyordu. Bu tur `python -m ntc serve` ile
+   gerçek ürün açıldı.
+
+   | ne | sonuç |
+   |---|---|
+   | `GET /` (panel) | 200 |
+   | `GET /api/status` | 200 |
+   | JS hatası (`uncaught`, `SyntaxError`, `ReferenceError`, `TypeError`) | **0** |
+   | Boş kart | **0/16** |
+
+   Ekran görüntüsünde her kart doluyordu: kutucuklar, zaman serisi grafiği,
+   doluluk ölçerleri, sınıf dağılımı, 10 satırlık cihaz tablosu, AI analisti
+   (3 bulgu + 6 cihaz bazlı öneri — 4m'de açık kalan hedef çözümleme kusurunun
+   düzeldiği görünüyor), akış planı + çıkış diyagramı, infaz kartı,
+   sınıflandırma kartı, senaryo düğmeleri.
+
+   **Etkileşim canlı test edildi.** `POST /api/sim/scenario`
+   (`{"name":"congestion","duration":90}`; listeleme ayrı uçta:
+   `GET /api/sim/scenarios`):
+
+   ```
+   t+ 25s  indirme %27  yükleme %29   talep  135 Mbps   darboğaz 0
+   t+ 40s  indirme %51  yükleme %61   talep  291 Mbps   darboğaz 0
+   t+ 55s  indirme %54  yükleme %72   talep  537 Mbps   darboğaz 4
+   t+100s  indirme %36  yükleme %49   talep  552 Mbps   darboğaz 4  (sönüyor)
+   ```
+
+   **"Darboğaz var ama toplam doluluk %72" çelişki değil.** İnceledim: doymuş
+   kenarlar `core→cikis-2` ve `cikis-2→internet`, ikisi de 18.0/18.0 Mbps
+   (doluluk 1.0). Çözücü bir bacağı sonuna kadar doldurup kalanı ötekine
+   taşırıyor; iki bacak (22 + 18) olduğu için toplam %72'de kalıyor. Doğru
+   davranış — ileride "darboğaz varken neden %100 değil" diye yeniden
+   sorulmasın diye kaydedildi.
+
+   Sınıflandırma kartı canlıda: %100 uyum, katman dağılımı
+   Port %59 / Hedef IP %21 / Varsayılan %20.
+
+4u. **✅ Testler depoya alındı, koşucu yazıldı** *(2026-08-26)*
+
+   **Bulgu:** "9 test paketi GECTI" satırının dayanağı **silinebilir bir temp
+   klasörüydü.** 46 test dosyası
+   `%LOCALAPPDATA%\Temp\claude\...\ef0f7898-.../scratchpad` altında duruyordu;
+   git'te izleri yoktu, Windows temp temizliği hepsini götürebilirdi. Faz 2
+   tam da bu testlerin koruduğu yüzeyi (toplayıcı, sınıflandırma, talep)
+   değiştireceği için önce koruma ağı sabitlendi.
+
+   | ne | sonuç |
+   |---|---|
+   | `tests/` altına alınan dosya | 46 → **45** (biri silindi, aşağıda) + 1 yeni = **46** |
+   | Sabit yol temizliği | 45 dosyada 51 `sys.path.insert(0, r"c:\...")` satırı depo-göreli hale geldi |
+   | Koşucu | `tests/kos.py` — her test ayrı süreçte, UTF-8 zorunlu |
+   | Varsayılan koşu | **31/31 geçti, 186 sn** |
+   | Model gerektiren koşu | **15/15 geçti, 1397 sn** |
+
+   **`t_sev` silindi — eski sözleşmeyi kodluyordu.** Çağırdığı
+   `AIAnalyst._calibrate_severity` artık yok: AI'ın rolü "dereceyi model
+   verir"den "dereceyi kural motoru verir"e çevrilince (Teknik borç #4)
+   yerini `_attach_severity` aldı ve testini `t_sev2` devraldı. Kırık test
+   değil, **kapanmış bir tasarımın kalıntısıydı**; onarmak eski davranışı
+   geri çağırmak olurdu. *(Aynı gerekçeyle `t_json.py`'den bir vaka
+   çıkarılmıştı — bkz. 4o.)*
+
+   **Testler ikiye ayrıldı ve ayrım "ağ kullanıyor mu" değil, "modele soruyor
+   mu".** 15 test gerçek bir LLM sağlayıcısına çıkarım yaptırıyor (14-33 sn,
+   çok turlular 75 sn'yi aşıyor) ve model yokken hepsi kırmızı yanardı —
+   gerçek gerilemeleri gizlerdi. Varsayılan koşuya girmiyorlar
+   (`--servis` / `--hepsi` ile çağrılıyorlar). `t_api`, `t_bosluk`, `t_snap`
+   de 30-60 sn sürüyor ve kontrolcü ayağa kaldırıyor ama **model olmadan da
+   sonuç veriyorlar**; onlar varsayılanda kaldı.
+
+   **UTF-8 bir kez yanlış teşhise yol açtı, koşucu bunu yapısal olarak
+   çözüyor.** Testler Türkçe yazıyor, Windows konsolu cp1252: ilk koşuda
+   16 testin 9'u "başarısız" göründü, sebebi `UnicodeEncodeError`'dı, kodda
+   hata yoktu. İronik ayrıntı: koşucunun **kendisi** ilk sürümünde tam bu
+   hataya düştü ("test koşuluyor" satırındaki `ş`) — çocuk süreçlere ortam
+   değişkeni geçirmek yetmiyor, süreç kendi çıktı akışını da çevirmek zorunda.
+
+4v. **✅ Akış kaynağı soyutlaması — `mode` artık gerçek** *(2026-08-26)*
+
+   **Bulgu:** `cfg.mode` (`simulation` | `live`) **hiçbir davranışı
+   değiştirmiyordu.** Tek kullanımı `cli.py` ile `/api/status` ekranıydı;
+   `_collect_loop` doğrudan `self.simulator.tick(dt)` çağırıyordu. Yani
+   `NTC_MODE=live` ile çalıştırılan sistem sessizce simülasyon üretmeye
+   devam ediyordu — ayar gibi görünen bir vaat.
+
+   | dosya | ne yapıyor |
+   |---|---|
+   | `ntc/traffic/source.py` | `FlowSource` protokolü (`name`, `devices`, `supports_scenarios`, `tick`, `start`, `aclose`) + `build_source(cfg)` |
+   | `ntc/traffic/simulator.py` | sözleşmeyi karşılıyor: `name="simulation"`, senaryo yeteneği, boş yaşam döngüsü |
+   | `ntc/controller.py` | `self.simulator` → `self.source`; kaynak `build_source` ile seçiliyor, `start`/`stop` kaynağın yaşam döngüsünü çağırıyor |
+
+   **Bilinmeyen modda hata veriyor, varsayılana düşmüyor.** Yazım hatası
+   yüzünden simülasyonda kalan bir kurulum, gerçek ağı izlediğini sanan bir
+   operatör demektir. `mode: live` şu an gerekçeli `UnsupportedMode`
+   fırlatıyor: *"Faz 2 — Sysmon/ETW telemetrisi henüz uygulanmadı."*
+   Türkçe karşılıklar (`simulasyon`, `canli`) da tanınıyor.
+
+   **Senaryolar arayüzün parçası DEĞİL, kaynağın yeteneği.** "Tıkanma
+   senaryosu tetikle" yalnız üretilmiş trafikte anlamlı; canlı yakalamada
+   karşılığı gerçek ağa sahte trafik basmak olurdu. `supports_scenarios`
+   bayrağı var: `POST /api/sim/scenario` yeteneği olmayan kaynakta gerekçeli
+   **409** dönüyor, `GET /api/sim/scenarios` ise boş liste + `supported:
+   false` (panel bu ucu her açılışta çağırıyor, orada hata gürültü olurdu).
+   Arayüze koyup canlı kaynakta boş geçseydik, düğmeye basan operatör
+   tetiklediğini sanacaktı.
+
+   `/api/status` artık `mode` (**istenen**) ile `source` (**olan**) alanlarını
+   ayrı veriyor.
+
+   **Doğrulama:** `mode` sweep'i (`live`/`canli` → gerekçeli hata,
+   `simulasyon` → simülatör, `sacma` → geçerli değerler listesiyle hata),
+   protokol uyumu (`isinstance(src, FlowSource)`), 12 akışlık `tick`,
+   ve **30/30 test** — `t_api` (16 uç canlı) dahil.
+
+   **Değiştirdiğim uçları hiçbir test kapsamıyordu.** `t_api` 16 ucu geziyor
+   ama senaryo uçları listesinde yoktu — yani tam da dokunduğum yüzey açıktaydı.
+   `t_kaynak.py` yazıldı, **21 kontrol**: mod eşlemesi (4 geçerli yazım),
+   canlı modun gerekçeli hatası, üç yazım hatası varyantı, protokol uyumu,
+   sahte kaynak takılınca toplayıcının onun akışlarını işlemesi, senaryo
+   uçlarının iki kaynakta da doğru davranması (200 ↔ 409).
+
+   *Testi yazarken iki kez kendi hatama düştüm ve ikisi de aynı şeyi
+   gösterdi:* sahte kaynağın ürettiği `Flow` önce yanlış alan adıyla
+   (`protocol`, doğrusu `proto`), sonra var olmayan `Direction.DOWN` ile
+   kuruluyordu. İkisinde de toplayıcı istisnayı yakalayıp logluyor ve
+   **sessizce 0 akış** işliyordu — test log seviyesi `CRITICAL` olduğu için
+   sebep görünmüyordu. Testin log seviyesi `ERROR`'a çekildi. Faz 2'de canlı
+   kaynak da bu döngüye takılacak; oradaki bir alan uyuşmazlığı aynı şekilde
+   sessiz kalırdı.
+
+   **Hâlâ eksik:** canlı kaynağın kendisi. Bu iş yalnız **yeri** açtı.
+
 ### Tasarımı konuşuldu, kodu yazılmadı
 
 4c. **Cache kaydı boşluğu**
@@ -1759,36 +1901,61 @@ yalnız `optimizer`, özet tutarlı.
 
 ### 🔴 Açık kalanlar
 
-- **İnfaz katmanı yok.** Plan hâlâ bir *hedef durum*. Mimari kararlaştırıldı:
-  kenarda (Windows domain) QoS politikası + DSCP damgası, çekirdekte router.
-  Router'lar da kontrolümüzde varsayılıyor. Elimizde fiziksel cihaz yok;
-  VirtualBox kurulu olduğu için Linux router sanal makinede test edilebilir.
-- **Talep = ölçülen, istenen değil.** Doygun hatta ölçüm körleşiyor. Çözümü
-  konuşuldu: cihaz başına *profil* (boş saatteki hız, transfer toplam boyutu),
-  anlık ölçüm değil. `db.py` 24 saatlik seriyi zaten tutuyor, kullanılmıyor.
-- **Sınıflandırma gerçek veride yok.** Simülatör sınıfı kendisi söylüyor.
-  Kademeli tasarım konuşuldu: süreç adı (Sysmon) → hedef IP → port → akış
-  şekli → emin değilsen "etkileşimli". Simülatörün etiketleriyle doğruluğu
-  ölçülebilir.
+*(2026-08-26'da elden geçirildi. Önceki liste **bayattı**: üç maddesinin üçü de
+kapanmış işleri açık gösteriyordu — infaz katmanı 4b'de, talep tahmini 4e'de,
+sınıflandırma 4f'de yazıldı. Bu dosya oturumlar arası hafıza olduğu için bayat
+bir borç listesi yapılmış işi yeniden yaptırır; bu yüzden madde kapanınca
+**burası da güncellenmeli.**)*
+
+**Yazıldı ama gerçek donanımda/veride doğrulanmadı:**
+
+- **İnfaz katmanı gerçek cihazda denenmedi.** Üç katman yazıldı ve gölge modda
+  ölçüldü (4b), ama doğrulanan şey **üretilen komut metni**; `tc` / QoS
+  politikasının cihazdaki davranışı değil. Gerçek router yok — VirtualBox
+  kurulu, Linux router sanal makinede sınanabilir.
+- **Talep tahmini simülasyonda etkisiz** (4e). Simülatör hat tavanını
+  uygulamadığı için sim'de ölçüm zaten talep. Katman `t_demand.py` üzerinde
+  kanıtlandı; asıl değeri gerçek ağda ortaya çıkacak.
+- **Sınıflandırma gerçek trafikte ölçülmedi** (4f). Doğruluk simülatöre karşı
+  %97-98; gerçek ağda katalogda olmayan uygulamalar varsayılana düşecek. Gölge
+  modda duruyor, `mode: canli` ancak canlı yakalama gelince anlamlı.
+
+**Küçük, bloklamayan borçlar:**
+
+- **AI payı `MAX_ROWS`=10 ile tavanlı** (4j/4k): canlıda 54 talebin 10'u modele
+  gidiyor, akışın %38'i. Denenmemiş kaldıraç: modele 10'ar 10'ar birkaç turda
+  sormak.
+- **Sayaçlı hatta model parayı değil gecikmeyi optimize ediyor** (4h).
+- **`--s1..--s5` beşlisi dotanopide referansın %70 altında** (4s). Metin yedeği
+  olduğu için acil değil.
+- **Gerçek ekran okuyucu (NVDA/JAWS) ile denetim yapılmadı** (4p).
+- **Windows'ta yol kararı uygulanamıyor** (RRAS politika tabanlı yönlendirme
+  yok). Mimari kısıt, borç değil — ama "uygulama-farkında yönlendirme" vaadi
+  saf Windows'ta verilemez.
 
 ### Doğrulama durumu
 
+*(2026-08-26: testler `tests/` altına alındı — artık bu tablo elle sayılan
+bir iddia değil, `python tests/kos.py` ile tekrarlanabilir bir ölçüm.)*
+
 ```
-9 test paketi                                          GECTI
-  t_parse   Foundry uc kesfi (7 vaka)
-  t_json    JSON cikarma (14 vaka)
-  t_targets hedef dogrulama + advise zorlamasi
-  t_sev2    derece eslestirmesi (Turkce ek dahil)
-  t_flowopt akis cozucusu (12 senaryo)
-  t_mix     yon basina sinif karisimi
-  t_actions plandan aksiyon uretimi
-  t_path    yol atama: yapiskanlik + oran
-  t_snap    snapshot butcesi ve budama
+python tests/kos.py            31/31 GECTI    186 sn
+python tests/kos.py --servis   15/15 GECTI   1397 sn  (yerel model gerektirir)
 
 derleme · panel JS · AST taramasi                      temiz
 16 API ucu + WebSocket, yuk altinda                    200
 AI cagrilari yuk altinda                               0 x 500
 ```
+
+Varsayılan koşudakiler (31): `t_actions t_api t_bosluk t_classify
+t_classify_sweep t_classify_tohum t_cvd t_cvd_ara t_cvd_dogrula t_cvd_olc
+t_demand t_enforce t_enforce_scope t_floors t_floors_shape t_flowopt
+t_hedef_birim t_json t_kaynak t_kazanc t_kurtarma t_mix t_optimallik t_parse
+t_path t_policy t_random_topo t_sabitler t_sev2 t_snap t_targets`
+
+Model gerektirenler (15): `t_ai_diag t_ai_flow t_ai_flow2 t_ai_ham
+t_ai_hibrit t_ai_policy t_ai_politika t_ai_random t_ai_tekrar t_ai_yeni
+t_hedef t_json_hata t_kesilme t_rows t_zincir`
 
 ## 7. Çalışma anlaşmaları
 

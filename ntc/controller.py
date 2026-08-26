@@ -49,7 +49,7 @@ from .traffic.demand import DemandEstimator
 from .traffic.flowpolicy import DEFAULT_POLICY, FlowPolicy
 from .traffic.optimizer import TrafficOptimizer
 from .traffic.topology import Topology
-from .traffic.simulator import TrafficSimulator
+from .traffic.source import FlowSource, build_source
 
 log = logging.getLogger(__name__)
 
@@ -58,7 +58,11 @@ class Controller:
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
         self.bus = EventBus()
-        self.simulator = TrafficSimulator()
+        # Akış kaynağı. Somut sınıf değil arayüz: `cfg.mode` bir ayar gibi
+        # görünüp hiçbir şeyi değiştirmiyordu, artık kaynağı o seçiyor.
+        # Bilinmeyen modda `build_source` hata veriyor — sessizce simülasyona
+        # düşmek, gerçek ağı izlediğini sanan bir operatör demek olurdu.
+        self.source: FlowSource = build_source(cfg)
         # Akış optimize edici — eşik denetçisinden ayrı bir iş yapıyor:
         # eşik "hat doldu" der, bu "trafiği nasıl dağıtalım" hesaplar.
         self.topology = (
@@ -161,12 +165,31 @@ class Controller:
                           cfg.core_driver, cfg.edge_driver, cfg.driver)
             return None
 
+    # -------------------------------------------------------------- senaryo
+
+    @property
+    def scenario_source(self) -> Any:
+        """Senaryo tetikleyebilen kaynak; yeteneği yoksa `None`.
+
+        Senaryolar arayüzün parçası değil çünkü canlı yakalamada karşılığı
+        yok — "tıkanma senaryosu tetikle" gerçek ağa sahte trafik basmak
+        olurdu. Yeteneği olmayan kaynakta API ucu gerekçeli hata veriyor;
+        boş geçseydi düğmeye basan operatör tetiklediğini sanacaktı.
+        """
+        return self.source if getattr(self.source, "supports_scenarios", False) else None
+
+    @property
+    def scenarios(self) -> list[Any]:
+        src = self.scenario_source
+        return list(src.scenarios) if src is not None else []
+
     # ------------------------------------------------------------------ yaşam
 
     async def start(self) -> None:
         if self._running:
             return
         await self.storage.open()
+        await self.source.start()
 
         self.provider = await create_provider(self.cfg.ai)
         self.analyst = AIAnalyst(self.cfg.ai, self.provider)
@@ -181,8 +204,9 @@ class Controller:
             asyncio.create_task(self._policy_loop(), name="policy"),
             asyncio.create_task(self._prune_loop(), name="prune"),
         ]
-        log.info("Controller başladı (mod=%s, ai=%s/%s)",
-                 self.cfg.mode, self.provider.name, self.provider.model)
+        log.info("Controller başladı (mod=%s, kaynak=%s, ai=%s/%s)",
+                 self.cfg.mode, self.source.name,
+                 self.provider.name, self.provider.model)
 
     async def stop(self) -> None:
         self._running = False
@@ -198,6 +222,7 @@ class Controller:
             task.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()
+        await self.source.aclose()
         if self.provider is not None:
             await self.provider.aclose()
         await self.storage.close()
@@ -209,7 +234,7 @@ class Controller:
         dt = self.cfg.collector.tick_seconds
         while self._running:
             try:
-                flows = self.simulator.tick(dt)
+                flows = self.source.tick(dt)
                 self.classifier.process(flows)
                 self._stamp_paths(flows)
                 self.metrics.add(flows)
@@ -235,7 +260,7 @@ class Controller:
             try:
                 # Eşik motoru yalnız uyarır; "ne kadar" kararını akış
                 # çözücüsü veriyor (bkz. optimizer.evaluate yorumu).
-                result = self.optimizer.evaluate(self.metrics, self.simulator.devices)
+                result = self.optimizer.evaluate(self.metrics, self.source.devices)
                 await self._emit_alerts(result.alerts)
             except asyncio.CancelledError:
                 raise
@@ -335,7 +360,7 @@ class Controller:
                 tavanlar[(h, y)] = float(c)
 
         demands = demands_from_signals(
-            signals, self.simulator.devices, self.topology,
+            signals, self.source.devices, self.topology,
             estimator=self.demand_estimator,
             link_stats=self.metrics.link_stats(),
             congestion_threshold=self.cfg.link.congestion_threshold,
@@ -376,7 +401,7 @@ class Controller:
         await self.storage.save_flow_plan(new_id("flw"), now(), plan)
 
         # Çözücünün kararlarını aksiyona çevirip politika defterine al.
-        actions = actions_from_plan(plan, self.simulator.devices,
+        actions = actions_from_plan(plan, self.source.devices,
                                     self.cfg.flow.min_pullback_mbps)
         recorded = self.optimizer.adopt(actions)
         if recorded:
@@ -404,7 +429,7 @@ class Controller:
         if self.enforcer is None:
             return None
         self.policies = policies_from_plan(
-            plan, self.simulator.devices, self.cfg.flow.min_pullback_mbps)
+            plan, self.source.devices, self.cfg.flow.min_pullback_mbps)
         onay = None
         if self.cfg.enforce.require_approval:
             onay = approved_keys(list(self.optimizer.active.values()),
@@ -428,7 +453,7 @@ class Controller:
         for f in flows:
             direction = "lan" if f.direction is Direction.LATERAL else (
                 "down" if f.bytes_down >= f.bytes_up else "up")
-            device = self.simulator.devices.get(f.device_id)
+            device = self.source.devices.get(f.device_id)
             host = getattr(device, "hostname", None) or f.device_id
             key = f"{f.src_ip}:{f.src_port}->{f.dst_ip}:{f.dst_port}/{f.proto}"
             f.egress = self.path_assigner.assign(
@@ -454,7 +479,7 @@ class Controller:
         # Analist artık tespit etmiyor, açıklıyor: kural motorunun uyarıları
         # ve çözücünün kararı ona olgu olarak veriliyor.
         report = await self.analyst.analyze(
-            self.metrics, self.simulator.devices, self.optimizer,
+            self.metrics, self.source.devices, self.optimizer,
             alerts=list(self.alerts)[:10], flow_plan=self.flow_plan)
         self.reports.appendleft(report)
         await self.storage.save_report(report)
@@ -472,7 +497,7 @@ class Controller:
         if self.analyst is None:
             return {"error": "AI analisti hazır değil", "answer": ""}
         return await self.analyst.ask(
-            question, self.metrics, self.simulator.devices, self.optimizer)
+            question, self.metrics, self.source.devices, self.optimizer)
 
     async def _emit_actions(self, actions: list[OptimizationAction]) -> None:
         if not actions:
@@ -502,6 +527,9 @@ class Controller:
         return {
             "running": self._running,
             "mode": self.cfg.mode,
+            # Kaynağın adı ayrı duruyor: `mode` istenen, bu **olan**.
+            "source": self.source.name,
+            "scenarios_supported": self.scenario_source is not None,
             "uptime_seconds": round(now() - self.started_at, 1) if self.started_at else 0,
             "ai": {
                 "provider": self.provider.name if self.provider else None,
@@ -540,7 +568,7 @@ class Controller:
             },
             "totals": self.metrics.totals,
             "active_policies": len(self.optimizer.active),
-            "scenarios": [s.to_dict() for s in self.simulator.scenarios],
+            "scenarios": [s.to_dict() for s in self.scenarios],
             "counts": {
                 "alerts": len(self.alerts),
                 "actions": len(self.actions),
@@ -551,7 +579,7 @@ class Controller:
     def devices_view(self) -> list[dict[str, Any]]:
         signals = self.metrics.device_signals()
         out = []
-        for device in self.simulator.devices.values():
+        for device in self.source.devices.values():
             sig = signals.get(device.id)
             row = device.to_dict()
             row["signals"] = sig.to_dict() if sig else None

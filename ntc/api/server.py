@@ -294,9 +294,22 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         if controller.analyst is None:
             raise HTTPException(503, "analist hazır değil")
         return controller.analyst.build_snapshot(
-            controller.metrics, controller.simulator.devices, controller.optimizer)
+            controller.metrics, controller.source.devices, controller.optimizer)
 
     # ------------------------------------------------------------- simülasyon
+
+    def _sim():
+        """Senaryo tetikleyebilen kaynak; yoksa gerekçeli 409.
+
+        Canlı kaynakta senaryo yok ve olmamalı — gerçek ağa sahte trafik
+        basmak demek olurdu. Sessizce boş dönmek yerine hata veriyoruz ki
+        düğmeye basan operatör tetiklediğini sanmasın.
+        """
+        src = controller.scenario_source
+        if src is None:
+            raise HTTPException(
+                409, f"senaryolar bu kaynakta yok (kaynak: {controller.source.name})")
+        return src
 
     @app.post("/api/sim/scenario")
     async def trigger_scenario(payload: dict = Body(...)):
@@ -304,7 +317,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         if not name:
             raise HTTPException(400, "name zorunlu")
         try:
-            scenario = controller.simulator.trigger(
+            scenario = _sim().trigger(
                 name,
                 device_id=payload.get("device"),
                 duration=float(payload.get("duration", 60)),
@@ -316,15 +329,21 @@ def create_app(cfg: Config | None = None) -> FastAPI:
 
     @app.get("/api/sim/scenarios")
     async def list_scenarios():
+        # Listeleme hata vermiyor: panel bu ucu her açılışta çağırıyor ve
+        # "yetenek yok" bilgisi 409'dan değil boş listeden okunmalı.
+        src = controller.scenario_source
+        if src is None:
+            return {"available": [], "active": [], "supported": False}
         from ..traffic.simulator import SCENARIOS
         return {
             "available": list(SCENARIOS),
-            "active": [s.to_dict() for s in controller.simulator.scenarios],
+            "active": [s.to_dict() for s in src.scenarios],
+            "supported": True,
         }
 
     @app.delete("/api/sim/scenarios")
     async def clear_scenarios():
-        return {"cleared": controller.simulator.clear_scenarios()}
+        return {"cleared": _sim().clear_scenarios()}
 
     # ------------------------------------------------------------------- canlı
 
@@ -349,7 +368,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
 
 
 def _hostname(controller: Controller, device_id: str) -> str:
-    device = controller.simulator.devices.get(device_id)
+    device = controller.source.devices.get(device_id)
     return device.hostname if device else device_id
 
 

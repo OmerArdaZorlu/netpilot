@@ -72,7 +72,17 @@ SCENARIOS = ("congestion", "bandwidth_hog", "port_scan", "exfil", "beacon", "qui
 
 
 class TrafficSimulator:
-    """Her `tick()` çağrısında o saniyeye ait akış listesini döndürür."""
+    """Her `tick()` çağrısında o saniyeye ait akış listesini döndürür.
+
+    `source.FlowSource` sözleşmesini karşılıyor: `name`, `devices`,
+    `supports_scenarios`, `tick`, `start`, `aclose`. Canlı kaynak geldiğinde
+    toplayıcının değişmesi gerekmeyecek.
+    """
+
+    #: Kaynak kimliği — loglarda ve `/api/status` içinde görünür.
+    name = "simulation"
+    #: Senaryolar üretilmiş trafiğe ait bir yetenek (bkz. `source.py`).
+    supports_scenarios = True
 
     def __init__(self, seed: int | None = None) -> None:
         self.rng = random.Random(seed)
@@ -137,6 +147,18 @@ class TrafficSimulator:
         return [s for s in self.scenarios if s.name == name]
 
     # ------------------------------------------------------------------- tick
+
+    # ------------------------------------------------------------- yaşam
+    # Simülatörün kuracağı bir bağlantı yok; arayüzü karşılamak için var.
+    # Canlı kaynakta bunlar abonelik açıp kapatacak.
+
+    async def start(self) -> None:
+        return None
+
+    async def aclose(self) -> None:
+        return None
+
+    # ------------------------------------------------------------- üretim
 
     def tick(self, dt: float = 1.0) -> list[Flow]:
         """dt saniyelik dilim için akışlar üretir."""

@@ -87,6 +87,17 @@ python -m ntc analyze --json                # makine okunur çıktı
 python -m ntc ask "en çok bandı kim yiyor?"
 ```
 
+### Testler
+
+```bash
+python tests/kos.py            # çevrimdışı testler
+python tests/kos.py --hepsi    # yerel model / ayakta sunucu isteyenler dahil
+python tests/kos.py -k flow    # adı eşleşenler
+```
+
+Her test ayrı süreçte koşar ve UTF-8 zorlanır — Windows konsolu cp1252 olduğu
+için Türkçe çıktı testleri bir kez **kodda hata yokken** başarısız göstermişti.
+
 ---
 
 ## Mimari
@@ -330,8 +341,11 @@ NTC_AI__MODEL=llama3.2  NTC_API__PORT=9000  python -m ntc serve
 - [x] **İnfaz katmanı** — politika nesneleri + `tc`/`New-NetQosPolicy`
       sürücüleri + fark uzlaştırıcı. Gölge modda; canlı çalıştırma gerçek
       cihaz üzerinde doğrulanana kadar bağlanmayacak.
-- [ ] **Faz 2 — Canlı mod:** scapy ile gerçek arayüz yakalama; `LiveSource`
-      simülatörün yerine aynı arayüzden geçer
+- [x] **Akış kaynağı soyutlaması** — `FlowSource` protokolü; `mode` ayarı
+      kaynağı gerçekten seçiyor, bilinmeyen değerde açılışta hata veriyor.
+      Canlı kaynağın yeri açıldı, kendisi Faz 2'de.
+- [ ] **Faz 2 — Canlı mod:** Sysmon (Event 3/22/1) ve/veya ETW ile gerçek
+      telemetri; `LiveSource` simülatörün yerine aynı arayüzden geçer
 - [ ] **Faz 3 — Akıllı firewall:** kural motoru + LLM'in trafik bağlamına bakıp
       dinamik kural üretmesi; kurallar önce "gölge modda" değerlendirilir
 - [ ] **Faz 4 — Honeypot + deception:** sahte servisler, tarama yapanları

@@ -34,7 +34,7 @@ from .prompts import (
     QA_SYSTEM,
     QA_USER,
 )
-from .provider import LLMProvider, LLMUnavailable, extract_json
+from .provider import LLMProvider, LLMUnavailable
 
 log = logging.getLogger(__name__)
 

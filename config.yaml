@@ -2,6 +2,10 @@
 # Bu dosyadaki her alanın koddaki bir varsayılanı var; sadece değiştirmek
 # istediklerini burada tut.
 
+# Akış kaynağı. Bu alan artık gerçekten kaynağı seçiyor (`ntc/traffic/source.py`);
+# önceden yalnız ekrana basılıyordu ve `live` yazan kurulum sessizce simülasyon
+# üretmeye devam ediyordu. Bilinmeyen bir değer yazılırsa sistem açılışta hata
+# verir — yazım hatası yüzünden "gerçek ağı izliyorum" sanmak en pahalı arıza.
 mode: simulation          # simulation | live   (live faz 2'de açılacak)
 
 # Hat kapasitesi. ⚠️ Bir `topology:` bloğu varsa bu değerler **oradan
