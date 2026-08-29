@@ -16,7 +16,7 @@ onlarca `from ntc...` import var, değiştirmek gereksiz kırılganlık)
 
 ```
 FlowSource → Metrics → (Optimizer ‖ AI Analyst) → Controller → API + Panel
-(kaynak: simulator | live —> Faz 2)
+(kaynak: simulator | live)
 ```
 
 | Modül | Dosya | Durum |
@@ -26,6 +26,7 @@ FlowSource → Metrics → (Optimizer ‖ AI Analyst) → Controller → API + P
 | Olay yolu | `ntc/core/bus.py` | ✅ async pub/sub |
 | Uygulama/cihaz katalogu | `ntc/traffic/catalog.py` | ✅ 16 uygulama, 10 cihaz profili |
 | Akış kaynağı | `ntc/traffic/source.py` | ✅ `FlowSource` protokolü; `mode` kaynağı gerçekten seçiyor, bilinmeyende hata veriyor |
+| Canlı kaynak | `ntc/traffic/capture.py` + `live.py` | ✅ Faz 2: yakalama ⋈ bağlantı tablosu; gerçek ağda ölçüldü (süreç çözülme %70). Yansıtma portu ve yönetici hakkı doğrulanmadı |
 | Trafik üreteci | `ntc/traffic/simulator.py` | ✅ 6 senaryo tetiklenebilir |
 | Metrikler | `ntc/traffic/metrics.py` | ✅ kayan pencere, WAN/LAN ayrı |
 | Optimizasyon motoru | `ntc/traffic/optimizer.py` | ✅ 5 kural, politika defteri, uyarı soğutma |
@@ -46,7 +47,7 @@ FlowSource → Metrics → (Optimizer ‖ AI Analyst) → Controller → API + P
 | API + WebSocket | `ntc/api/server.py` | ✅ |
 | Panel | `ntc/dashboard/index.html` | ✅ görsel + erişilebilirlik + renk körlüğü denetiminden geçti (12 kusur düzeltildi); 2026-08-26'da gerçek `serve` üzerinde uçtan uca çalıştırıldı |
 | CLI | `ntc/cli.py` | ✅ serve / watch / analyze / ask / doctor |
-| Testler | `tests/` (45 dosya) | ✅ depoya alındı; `python tests/kos.py` → 30/30 |
+| Testler | `tests/` (47 dosya) | ✅ depoya alındı; `python tests/kos.py` → 32/32 |
 
 ### Çalıştırma
 
@@ -1155,6 +1156,132 @@ Server 2025 Evaluation (ücretsiz, 180 gün) / Azure VM / Win11 Pro yükseltme.
 
    **Hâlâ eksik:** canlı kaynağın kendisi. Bu iş yalnız **yeri** açtı.
 
+4w. **✅ FAZ 2 — Canlı kaynak: gerçek trafik `Flow`'a dönüyor** *(2026-08-26)*
+
+   Simülatörün yerine geçen ilk gerçek kaynak. `mode: live` artık çalışan bir
+   şey.
+
+   **Tasarımı belirleyen kısıt: Windows'ta kimlik ile hacim aynı kaynaktan
+   gelmiyor.**
+
+   | besleme | verdiği | vermediği |
+   |---|---|---|
+   | paket yakalama (Npcap/scapy) | 5'li başına **bayt/paket** | süreç |
+   | bağlantı tablosu (`psutil`) | 5'li başına **süreç/PID** | bayt |
+   | *(Sysmon Event 3)* | süreç, olay tabanlı | **bayt alanı yok** |
+
+   Yani "Sysmon kurunca canlı mod gelir" yanlış bir beklenti olurdu: Sysmon
+   bağlantı olayında hacim yok. Doğru şekil **iki beslemenin 5'li üzerinden
+   birleştirilmesi** ve Sysmon ileride kimlik beslemesinin *yerine* geçer,
+   birleştirmenin şekli değişmez.
+
+   | dosya | ne yapıyor |
+   |---|---|
+   | `ntc/traffic/capture.py` | hacim beslemesi: scapy `AsyncSniffer`, 5'li başına sayaç. Paket **saklanmıyor** (`store=False`), yalnız tamsayı artıyor |
+   | `ntc/traffic/live.py` | `ConnectionOwners` (kimlik) + `LiveSource` (birleştirme, yön kararı, cihaz türetme) |
+   | `ntc/core/config.py` | `live:` bloğu (arayüz, filtre, yoklama sıklığı, TTL) |
+
+   **Ölçüm (gerçek ağ, bu makine, yönetici DEĞİL):** 75 akış / 275 KiB,
+   736 paket, süreç adı çözülme **%70**. Gerçek süreçler çıktı:
+   `claude.exe`, `opera.exe`, `msedge.exe`, `steamwebhelper.exe`,
+   `Code.exe`, `ms-teams.exe`.
+
+   #### Dört kusur ölçümle bulundu, üçü sessizdi
+
+   **1. Yakalama "çalışıyor" görünüp 0 paket üretiyordu — yanlış arayüz.**
+   scapy'nin varsayılan arayüzü bu makinede bir TAP adaptörüydü;
+   `running` True, 10 saniyede sıfır paket. Doğru arayüzde (Wi-Fi) yönetici
+   olmadan 33 paket geldi, yani sebep yetki değildi.
+   → `guess_interface()`: kurulu **dış bağlantıların yerel adreslerine**
+   bakıp o adresi taşıyan arayüzü seçiyor. "Arayüz ayakta mı" yetmiyor —
+   VPN/VirtualBox adaptörleri de ayakta ve IP'li. *Trafiğin aktığı yeri akan
+   trafik söylüyor.*
+
+   **2. Sessizlik artık bir durum alanı.** "Ayakta ama hiç paket yok" dışarıdan
+   sağlıklı görünüyordu: panel sıfır trafikle dolar, kimse sebebini aramaz.
+   `PacketVolumeFeed.sessiz` + tek seferlik uyarı logu + `/api/status`
+   içinde `capture_silent`.
+
+   **3. Katman importu geç kalıyordu ve BÜTÜN paketler düşüyordu.** scapy
+   katmanları (`IP`, `TCP`, `UDP`) ilk paket geldiğinde import ediliyordu;
+   scapy paketi **çözümlerken** o sınıflar yüklü olmadığı için bağlantı
+   katmanını tanıyamıyor ("Unable to guess datalink type") ve her paketi ham
+   `Packet` olarak kuruyordu. `IP in pkt` hiçbir zaman tutmuyor: yakalama
+   **45 paket teslim etmesine rağmen sayaçlar 0** kalıyordu. Çözümleme geriye
+   dönük düzeltilemiyor. → Katmanlar yakalamadan **önce** yükleniyor
+   (`_katmanlar()`).
+
+   *Bu kusur teşhis edilirken iki kez yanlış yöne sapıldı ve ikisi de
+   ölçümle elendi: BPF filtresi (`ip` 104 paket, `ip or ip6` 26 paket —
+   ikisi de çalışıyor) ve karışık mod (`promisc=False` 55 paket — o da
+   çalışıyor).*
+
+   **4. Süreç çözülme oranı %52'de takılıydı — sebebi `psutil`'in UDP'yi
+   uzak uçsuz vermesi.** Ölçüm: 71 UDP kaydının **71'inde** `raddr` boş;
+   ayrıca 60 soket joker adrese (`0.0.0.0`/`::`) bağlı ama paket somut IP
+   taşıyor. Yalnız 5'li anahtarla çalışırken bütün QUIC/DNS trafiği sahipsiz
+   kalıyordu.
+   → Kimlik tablosu **üç seviyede** indeksleniyor: tam 5'li → yerel uç →
+   yalnız port. Aramada da bu sırayla deneniyor; zayıf eşleşme yalnız
+   güçlüsü yokken kullanılıyor.
+   **%52 → %59 → %70.**
+
+   #### Bilerek yapılmayanlar
+
+   - **`rtt_ms` ve `retransmits` 0 kalıyor.** Paket sayaçlarından ikisi de
+     çıkarılamaz (RTT için ACK eşlemesi, yeniden gönderim için sıra numarası
+     takibi gerekir). Uydurmak yerine sıfır: **hat kalitesi kuralları canlı
+     modda kör**, hat doluluğu kuralları etkilenmiyor. Açık borç.
+   - **Sınıf etiketi üretilmiyor** (`labels_traffic_class = False`).
+     Kontrolcü bunu görüp sınıflandırıcıyı **canlı moda alıyor** ve gerekçeyi
+     logluyor: gölge modda kalsaydı bütün trafik varsayılan sınıfta kalır ve
+     önceliklendirme sessizce anlamsızlaşırdı.
+   - **`Flow.process` alanı eklendi.** `ClassifyAudit` zaten `flow.process`
+     okuyordu ama `Flow`'da öyle bir alan yoktu — yani sınıflandırıcının **en
+     sağlam katmanı canlı modda hiç ateşlenmeyecekti.** Sessiz bir uyumsuzluk;
+     bulunduğu için kapandı.
+   - **Cihaz envanteri gözlemden doğuyor**, kimliği uydurulmuyor: `kind`
+     UNKNOWN, `trust` sabit. AD entegrasyonuna kadar bilinmiyor.
+
+   #### Kalan kayıp öğretici
+
+   Çözülemeyen akışların çoğu `tcp/80` — yani **ölçüm sırasında benim
+   ürettiğim** kısa ömürlü isteklerin kendisi: yoklama arasında açılıp
+   kapanıyorlar. Sysmon Event 3 olay tabanlı olduğu için tam bu boşluğu
+   kapatır. **Sysmon'un gerçek katkısı "süreç adı" değil, yoklamanın
+   kaçırdığı kısa ömürlü bağlantılar.**
+
+   **Testler:** `t_live.py` — paketleri kendisi kurup besliyor, yani yönetici
+   ve ağ gerektirmiyor (29 kontrol: yön/anahtarlama, iki yönün tek kovada
+   birleşmesi, sessizlik tespiti, üç anahtar seviyesi, TTL, `Flow` üretimi,
+   sınıflandırıcı modunun otomatik geçişi). Gerçek yakalama ayrıca elle
+   ölçüldü (yukarıdaki sayılar); ağda o an ne aktığı tekrarlanabilir bir
+   ölçüm olmadığı için teste konmadı.
+
+   #### Uçtan uca: kontrolcü + canlı kaynak (gerçek trafik)
+
+   ```
+   kaynak: live   sınıflandırıcı: canli (otomatik geçti, gerekçe loglandı)
+   111 akış · 577 paket · süreç çözülme %95.5 · yakalama sessiz değil
+   sınıf dağılımı: interactive 0.04 / background 0.01 / bulk / streaming
+   ```
+
+   **Süreç çözülme %70 → %95.5** ve sebebi öğretici: kontrolcü saniyede bir
+   yokluyor ve TTL biriktiği için kısa ömürlü bağlantılar da yakalanıyor.
+   Tek seferlik ölçümdeki %70, yoklama geçmişi olmayan **soğuk başlangıcın**
+   oranıydı.
+
+   **Katman dağılımı simülasyondakinin tersi çıktı:** canlıda **şekil %89**,
+   port %3.6, süreç %4.5, IP %0.9. Simülasyonda port başı çekiyordu
+   (%59). Sebep: gerçek trafiğin çoğu küçük hacimli keepalive/telemetri ve
+   şekil katmanı onları "hacim çok küçük → background" diye önce yakalıyor.
+   ⚠️ Bu **isabet değil dağılım**; canlıda karşılaştırılacak doğru etiket
+   olmadığı için sınıflandırma doğruluğu hâlâ ölçülmemiş durumda.
+
+   ⚠️ **Doğrulanmamış:** yansıtma (SPAN) portundan çok cihazlı yakalama,
+   yönetici hakkıyla davranış, yüksek hızda (>100 Mbps) paket düşme oranı,
+   canlı sınıflandırmanın **isabeti**.
+
 ### Tasarımı konuşuldu, kodu yazılmadı
 
 4c. **Cache kaydı boşluğu**
@@ -1907,6 +2034,16 @@ sınıflandırma 4f'de yazıldı. Bu dosya oturumlar arası hafıza olduğu içi
 bir borç listesi yapılmış işi yeniden yaptırır; bu yüzden madde kapanınca
 **burası da güncellenmeli.**)*
 
+**Faz 2 geldi, ama kapsamı sınırlı:**
+
+- **Canlı kaynak tek makineden bakıyor.** `LiveSource` bu makinenin
+  trafiğini görüyor; ağın tamamını görmek için yansıtma (SPAN) portu ya da
+  cihaz başına ajan gerekiyor — ikisi de doğrulanmadı.
+- **Süreç çözülme %70.** Kalan kayıp yoklama arasında doğup ölen kısa
+  ömürlü bağlantılar; Sysmon Event 3 (olay tabanlı) tam bu boşluğu kapatır.
+- **`rtt_ms` / `retransmits` canlıda 0.** Hat *kalitesi* kuralları canlı
+  modda kör; hat *doluluğu* kuralları çalışıyor.
+
 **Yazıldı ama gerçek donanımda/veride doğrulanmadı:**
 
 - **İnfaz katmanı gerçek cihazda denenmedi.** Üç katman yazıldı ve gölge modda
@@ -1917,8 +2054,10 @@ bir borç listesi yapılmış işi yeniden yaptırır; bu yüzden madde kapanın
   uygulamadığı için sim'de ölçüm zaten talep. Katman `t_demand.py` üzerinde
   kanıtlandı; asıl değeri gerçek ağda ortaya çıkacak.
 - **Sınıflandırma gerçek trafikte ölçülmedi** (4f). Doğruluk simülatöre karşı
-  %97-98; gerçek ağda katalogda olmayan uygulamalar varsayılana düşecek. Gölge
-  modda duruyor, `mode: canli` ancak canlı yakalama gelince anlamlı.
+  %97-98; gerçek ağda katalogda olmayan uygulamalar varsayılana düşecek.
+  Canlı modda sınıflandırıcı artık **yazar** durumda (4w) ama canlıda
+  karşılaştırılacak doğru etiket olmadığı için isabeti ölçülemiyor — ancak
+  elle etiketlenmiş bir örneklemle ölçülebilir.
 
 **Küçük, bloklamayan borçlar:**
 
@@ -1939,7 +2078,7 @@ bir borç listesi yapılmış işi yeniden yaptırır; bu yüzden madde kapanın
 bir iddia değil, `python tests/kos.py` ile tekrarlanabilir bir ölçüm.)*
 
 ```
-python tests/kos.py            31/31 GECTI    186 sn
+python tests/kos.py            32/32 GECTI    240 sn
 python tests/kos.py --servis   15/15 GECTI   1397 sn  (yerel model gerektirir)
 
 derleme · panel JS · AST taramasi                      temiz
@@ -1947,11 +2086,11 @@ derleme · panel JS · AST taramasi                      temiz
 AI cagrilari yuk altinda                               0 x 500
 ```
 
-Varsayılan koşudakiler (31): `t_actions t_api t_bosluk t_classify
+Varsayılan koşudakiler (32): `t_actions t_api t_bosluk t_classify
 t_classify_sweep t_classify_tohum t_cvd t_cvd_ara t_cvd_dogrula t_cvd_olc
 t_demand t_enforce t_enforce_scope t_floors t_floors_shape t_flowopt
-t_hedef_birim t_json t_kaynak t_kazanc t_kurtarma t_mix t_optimallik t_parse
-t_path t_policy t_random_topo t_sabitler t_sev2 t_snap t_targets`
+t_hedef_birim t_json t_kaynak t_kazanc t_kurtarma t_live t_mix t_optimallik
+t_parse t_path t_policy t_random_topo t_sabitler t_sev2 t_snap t_targets`
 
 Model gerektirenler (15): `t_ai_diag t_ai_flow t_ai_flow2 t_ai_ham
 t_ai_hibrit t_ai_policy t_ai_politika t_ai_random t_ai_tekrar t_ai_yeni

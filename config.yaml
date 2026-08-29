@@ -6,7 +6,33 @@
 # önceden yalnız ekrana basılıyordu ve `live` yazan kurulum sessizce simülasyon
 # üretmeye devam ediyordu. Bilinmeyen bir değer yazılırsa sistem açılışta hata
 # verir — yazım hatası yüzünden "gerçek ağı izliyorum" sanmak en pahalı arıza.
-mode: simulation          # simulation | live   (live faz 2'de açılacak)
+mode: simulation          # simulation | live
+
+# Canlı mod (mode: live) — gerçek trafiği yakalar.
+#
+# Kimlik ile hacim Windows'ta aynı kaynaktan gelmiyor: paket yakalama baytı
+# verir ama süreci bilmez, bağlantı tablosu süreci verir ama baytı bilmez.
+# Sistem ikisini 5'li üzerinden birleştiriyor (ntc/traffic/live.py).
+#
+# ⚠️ Yakalama Npcap sürücüsü istiyor; kurulum "non-admin" seçilmediyse
+# süreci yönetici olarak çalıştırmak gerekir.
+live:
+  # Boş bırakılırsa arayüz TAHMİN EDİLİYOR: kurulu dış bağlantıların yerel
+  # adreslerine bakılıp o adresi taşıyan arayüz seçiliyor. Tahmin gerekliydi —
+  # scapy'nin varsayılanı bu makinede bir TAP adaptörüydü ve yakalama
+  # "çalışıyor" görünüp 0 paket üretiyordu. Yine de birden çok aktif arayüz
+  # varsa doğrusunu buraya yazmak en güvenlisi.
+  interface: ""
+  bpf_filter: "ip or ip6"
+  # Yalnız yansıtma (SPAN) portunda anlamlı.
+  promiscuous: false
+  # Bağlantı tablosu yoklaması. Kısa ömürlü bağlantılar (tek HTTP isteği,
+  # DNS) iki yoklama arasında kapanıyor; ttl onları bir süre hatırlatıyor.
+  # Ölçüldü: bu yoklamayla süreç çözülme oranı %70; kalan kayıp ağırlıklı
+  # olarak yoklama arasında doğup ölen bağlantılar. Sysmon Event 3 olay
+  # tabanlı olduğu için o boşluğu kapatır.
+  owner_poll_seconds: 1.0
+  owner_ttl_seconds: 120.0
 
 # Hat kapasitesi. ⚠️ Bir `topology:` bloğu varsa bu değerler **oradan
 # türetiliyor** ve buradakiler yok sayılıyor — panel doluluğu ile çözücünün

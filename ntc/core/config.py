@@ -166,6 +166,32 @@ class ClassifyConfig:
 
 
 @dataclass
+class LiveConfig:
+    """Canlı yakalama (`mode: live`) ayarları.
+
+    ⚠️ Paket yakalama **yönetici hakkı** istiyor (Npcap sürücüsü). Haksızken
+    kaynak sessizce boş akış üretmiyor, açılışta gerekçeli hata veriyor —
+    "sistem çalışıyor ama hiç trafik görmüyor" en kötü arıza biçimi.
+    """
+
+    # Boş = scapy'nin seçtiği varsayılan arayüz. Birden çok arayüz varsa
+    # (VPN, VirtualBox, Wi-Fi) doğru olanı yazmak gerekir; yanlış arayüz
+    # sıfır trafik demek.
+    interface: str = ""
+    # BPF filtresi. Varsayılan IP trafiği; ARP/STP gibi hat kapasitesini
+    # tüketmeyen çerçeveler dışarıda kalıyor.
+    bpf_filter: str = "ip or ip6"
+    # Karışık mod: yalnız yansıtma (SPAN) portunda anlamlı. Normal bir uçta
+    # açmak işe yaramaz, bazı sürücülerde yakalamayı bozar.
+    promiscuous: bool = False
+    # Bağlantı tablosu yoklama sıklığı ve hafızası. Kısa ömürlü bağlantılar
+    # (DNS, tek istek) iki yoklama arasında kapanıyor; hafıza olmadan tam da
+    # onların sahibini kaybederdik.
+    owner_poll_seconds: float = 1.0
+    owner_ttl_seconds: float = 120.0
+
+
+@dataclass
 class Config:
     mode: str = "simulation"
     link: LinkConfig = field(default_factory=LinkConfig)
@@ -178,6 +204,7 @@ class Config:
     flow: FlowConfig = field(default_factory=FlowConfig)
     enforce: EnforceConfig = field(default_factory=EnforceConfig)
     classify: ClassifyConfig = field(default_factory=ClassifyConfig)
+    live: LiveConfig = field(default_factory=LiveConfig)
     # Topoloji düz bir dataclass değil (kenar listesi), o yüzden ham
     # haliyle taşınıp `Topology.from_config` tarafından ayrıştırılıyor.
     topology_raw: dict[str, Any] | None = None
@@ -224,6 +251,7 @@ _NESTED = {
     "flow": FlowConfig,
     "enforce": EnforceConfig,
     "classify": ClassifyConfig,
+    "live": LiveConfig,
 }
 
 

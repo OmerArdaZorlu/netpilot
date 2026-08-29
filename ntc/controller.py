@@ -104,6 +104,17 @@ class Controller:
         # Trafik sınıflandırma. Varsayılan gölge: karar veriyor ama
         # yazmıyor; uyum oranı `/api/classify` ucunda ölçülüyor.
         self.classifier = ClassifyAudit(self.cfg.classify)
+        # **Etiketlemeyen kaynakta gölge mod anlamsız.** Gölge = "karar ver,
+        # ama akışa dokunma, kaynağın etiketiyle karşılaştır". Canlı
+        # yakalamada karşılaştırılacak etiket yok ve dokunmazsak bütün
+        # trafik varsayılan sınıfta kalır — önceliklendirme sessizce
+        # anlamsızlaşır. Kararı burada, gerekçesini logda veriyoruz.
+        if not getattr(self.source, "labels_traffic_class", True) \
+                and self.classifier.mode != "canli":
+            log.warning("Kaynak (%s) sınıf etiketi üretmiyor; sınıflandırıcı "
+                        "gölge moddan canlıya alındı — yoksa bütün akışlar "
+                        "varsayılan sınıfta kalırdı", self.source.name)
+            self.classifier.mode = "canli"
         self.flow_plan: FlowPlan | None = None
         # Akışları planın oranlarına göre çıkışlara dağıtır.
         self.path_assigner = PathAssigner()
@@ -530,6 +541,11 @@ class Controller:
             # Kaynağın adı ayrı duruyor: `mode` istenen, bu **olan**.
             "source": self.source.name,
             "scenarios_supported": self.scenario_source is not None,
+            # Kaynağın kendi durumu — canlıda "yakalama ayakta mı, kaç paket
+            # gördü, akışların kaçının sahibi bulundu". Bu alan olmadan
+            # "canlı mod çalışıyor" ölçülemez bir iddia olurdu.
+            "source_detail": (self.source.to_dict()
+                              if hasattr(self.source, "to_dict") else None),
             "uptime_seconds": round(now() - self.started_at, 1) if self.started_at else 0,
             "ai": {
                 "provider": self.provider.name if self.provider else None,

@@ -118,6 +118,11 @@ class Flow:
     rtt_ms: float = 0.0
     retransmits: int = 0
     flags: list[str] = field(default_factory=list)
+    # Bağlantıyı açan süreç (canlı modda bağlantı tablosundan / Sysmon Event
+    # 3'ten gelir; simülasyonda boş). Sınıflandırıcının **1. katmanı** bu
+    # alanı okuyor — `ClassifyAudit` zaten `flow.process` bekliyordu ama alan
+    # yoktu, yani canlı modda en sağlam katman hiç ateşlenmeyecekti.
+    process: str = ""
     # Akış çözücüsünün bu akışa atadığı çıkış düğümü. Boşsa henüz plan yok
     # ya da tek yol var. **Akış başına** atanır ve akış boyunca değişmez —
     # paketleri iki yola serpiştirmek TCP'yi yavaşlatır (sırasız gelen paket

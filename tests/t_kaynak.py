@@ -45,6 +45,8 @@ class SahteKaynak:
 
     name = "sahte"
     supports_scenarios = False
+    # Protokole Faz 2'de eklendi: kaynak akisin sinifini biliyor mu.
+    labels_traffic_class = True
 
     def __init__(self):
         self.devices = {}
@@ -81,16 +83,18 @@ for mod, beklenen in [("simulation", "simulation"), ("sim", "simulation"),
     except UnsupportedMode as e:
         kontrol(f"mode={mod!r} kaynak kurdu", False, str(e)[:50])
 
-# Canli mod: kodu yazilana kadar HATA vermeli. Sessizce simulatore dusmek
-# "gercek agi izliyorum" sanan bir operator demek.
+# Canli mod (Faz 2). Bu blok once "hata vermeli" diye yaziliydi, cunku canli
+# kaynagin kodu yoktu; kaynak yazilinca sozlesme degisti ve test onunla
+# birlikte guncellendi. Onemli olan degismedi: `live` yazan kurulum
+# SIMULASYON uretmemeli.
 for mod in ("live", "canli", "canlı"):
     cfg.mode = mod
     try:
         s = build_source(cfg)
-        kontrol(f"mode={mod!r} sessizce {s.name} kurdu", False,
-                "canli mod uygulanmadan kaynak donmemeli")
+        kontrol(f"mode={mod!r} -> {s.name}",
+                s.name == "live" and not s.labels_traffic_class)
     except UnsupportedMode as e:
-        kontrol(f"mode={mod!r} -> gerekceli hata", "Faz 2" in str(e))
+        kontrol(f"mode={mod!r} kaynak kurdu", False, str(e)[:60])
 
 # Yazim hatasi da sessiz kalmamali.
 for mod in ("sacma", "", "simulaton"):

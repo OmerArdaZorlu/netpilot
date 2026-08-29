@@ -1,35 +1,49 @@
 # netpilot
 
-Yerel bir LLM ile çalışan ağ yönetim çekirdeği. Trafiği toplar, ölçer, tıkanmayı
-tespit eder, gerekçeli QoS politikaları üretir; AI analisti bu tabloyu okuyup
-özet, bulgu ve öneri çıkarır.
+Ağ trafiğini ölçen, **hangi trafiğin hangi hattan ne kadar akacağını doğrusal
+programla hesaplayan** ve bu kararı cihaz komutuna çeviren bir kontrol
+çekirdeği. Trafik ya simüle edilir ya da gerçek arayüzden yakalanır. Yerel bir
+LLM kararı operatöre açıklıyor ve çözücünün hedefini kuruyor — sayıları
+hesaplayan matematik, açıklayan model.
+
+> **Eşik denetimi optimizasyon değildir.** "Doluluk %80'i geçti → uyar" bir
+> termostattır; sistemde o da var ama ayrı bir iş yapıyor. Optimizasyon,
+> ölçülen talepleri ağın kapasitesine karşı çözüp cihaz başına sayı
+> üretmektir. **Eşik motoru durumu tespit eder, sayıyı çözücü verir.**
 
 > **Paket adı `ntc`, repo adı `netpilot`.** Kasıtlı: içeride onlarca `from ntc…`
 > import var, yeniden adlandırmak gereksiz kırılganlık.
 
-**Bu sürümde:**
-- Trafik toplama, metrikler (WAN ve LAN ayrı ölçülür)
-- Eşik tabanlı kural motoru — tıkanma tespiti, QoS politika taslakları
+**Çalışan ve ölçülmüş olanlar:**
+
+- **Trafik toplama ve metrikler** — WAN ve LAN ayrı ölçülür
+- **Trafik sınıflandırma** — DPI'sız, katmanlı: süreç adı → tek-sınıflı port →
+  hedef IP → akış şekli → varsayılan
+- **Talep tahmini** — doygun hatta ölçülen hız zaten tavandır; gerçek talep
+  hattın boş olduğu anlardan öğrenilir
+- **Eşik tabanlı kural motoru** — tıkanma tespiti ve uyarılar
 - **Akış optimize edici** — çok mallı akış problemini doğrusal programla
   çözer: hangi trafik hangi çıkıştan, kimden ne kadar geri çekilmeli
-- **Topoloji üreteci** — tohumlu, rastgele ama gerçekçi ağlar; sistem elle
-  yazılmış tek bir topolojiye bağlı değil
+- **Topoloji modeli + üreteci** — tohumlu, rastgele ama gerçekçi ağlar; sistem
+  elle yazılmış tek bir topolojiye bağlı değil
 - **İnfaz katmanı** — planı cihazdan bağımsız politikalara, onları `tc` /
-  `New-NetQosPolicy` komutlarına çevirir; farkı uzlaştırır
-- **AI politika katmanı** — duruma göre çözücünün hedefini kurar
-  (sınıf sırası, taban profili, ağırlık seviyeleri); ürettiği her alan
-  doğrulanır, geçersizse reddedilir
-- Yerel LLM analisti (Foundry Local / Ollama / kural tabanlı yedek)
-- Canlı panel, simülasyon ortamı, 6 tetiklenebilir senaryo
+  `New-NetQosPolicy` komutlarına çevirir; farkı uzlaştırır (**gölge modda**)
+- **AI politika katmanı** — duruma göre çözücünün hedefini kurar; ürettiği her
+  alan doğrulanır, geçersizse reddedilir
+- **Yerel LLM analisti** — Foundry Local / Ollama / kural tabanlı yedek
+- **Canlı yakalama modu** (`mode: live`) — gerçek trafik akışlara çevrilir;
+  hacim paket yakalamadan, süreç kimliği bağlantı tablosundan gelip 5'li
+  üzerinden birleşir
+- **Panel + API** — 31 HTTP ucu, WebSocket, canlı dashboard
+- **Simülasyon ortamı** — 6 tetiklenebilir senaryo
+- **Test paketi** — 47 dosya; `python tests/kos.py` → 32/32
 
-**Sonraki:** canlı yakalama (scapy) → akıllı firewall → honeypot/deception →
-endpoint agent'ları.
-
-> ⚠️ İnfaz **gölge modda**. Komutlar üretilir ve panelde gösterilir, hiçbiri
-> çalıştırılmaz. Canlı mod bilerek bağlanmadı: üzerinde doğrulama
-> yapabileceğimiz gerçek bir cihaz yok ve sınanmamış çalıştırma kodu "hazır"
-> görünür. Komut *metni* teste karşı doğrulandı, komutun cihazdaki *davranışı*
-> doğrulanmadı.
+> **İki ayrı "canlı" var, karıştırmayın:**
+> `mode: live` → **trafiği gerçekten yakalar** (çalışıyor).
+> `enforce.mode: canli` → **komutu gerçekten çalıştırır** (bilerek bağlı değil).
+> İnfaz gölge modda kalıyor çünkü üzerinde doğrulama yapabileceğimiz gerçek bir
+> cihaz yok; sınanmamış çalıştırma kodu "hazır" görünür. Komut *metni* teste
+> karşı doğrulandı, komutun cihazdaki *davranışı* doğrulanmadı.
 
 ---
 
@@ -104,8 +118,8 @@ için Türkçe çıktı testleri bir kez **kodda hata yokken** başarısız gös
 
 ```
               ┌──────────────┐
-              │  Simulator   │  sentetik ama gerçekçi akışlar
-              │  (→ Live)    │  faz 2'de scapy ile canlı yakalama
+              │  FlowSource  │  mode: simulation -> sentetik akışlar
+              │              │  mode: live       -> yakalama ⋈ bağlantı tablosu
               └──────┬───────┘
                      │ Flow[]
               ┌──────▼───────┐
@@ -303,13 +317,16 @@ curl -X POST http://127.0.0.1:8080/api/sim/scenario \
 | `GET /api/metrics/live` | Anlık pencere metrikleri, sınıf payları, en çok trafik |
 | `GET /api/metrics/history?seconds=` | Zaman serisi |
 | `GET /api/flows/notable` | Kaydedilmiş dikkat çekici akışlar |
+| `GET /api/classify` | Sınıflandırma denetimi: uyum oranı, katman başına pay ve isabet |
 | `GET /api/alerts` · `GET /api/actions` | Uyarılar / politikalar |
 | `POST /api/actions/{id}/apply` · `/revert` | Politika onayı / kaldırma |
-| `GET /api/ai/report` · `POST /api/ai/analyze` | AI analizi |
+| `GET /api/ai/health` · `GET /api/ai/report` · `GET /api/ai/reports` | AI sağlığı ve raporlar |
+| `POST /api/ai/analyze` | Beklemeden analiz ettir |
 | `POST /api/ai/ask` | Serbest metin soru-cevap |
 | `GET /api/ai/snapshot` | Modele giden ham bağlam (şeffaflık/hata ayıklama) |
 | `GET /api/flow/plan` | Son akış çözümü: tahsisler, geri çekmeler, darboğazlar |
 | `POST /api/flow/solve` | Beklemeden yeniden çöz |
+| `GET /api/flow/history` | Geçmiş akış planları (toplamlar, geri çekmeler, darboğazlar) |
 | `GET /api/flow/topology` | Topoloji grafiği (düğümler + kenarlar) |
 | `GET /api/flow/ai` | Modelin son akış önerisi + akışın ne kadarı onun kararı |
 | `GET /api/flow/demand` | Talep profilleri: hangi cihaz boş saatte ne çekiyor |
@@ -318,7 +335,7 @@ curl -X POST http://127.0.0.1:8080/api/sim/scenario \
 | `GET /api/enforce/state` | İnfaz durumu: sürücü, mod, kurulu kurallar, son uzlaştırma |
 | `GET /api/enforce/policies` | Son plandan çıkan **istenen** politika kümesi |
 | `GET /api/enforce/preview` | Kuru çalıştırma: hepsi onaylı olsa hangi komutlar çıkardı |
-| `POST /api/sim/scenario` · `DELETE /api/sim/scenarios` | Senaryo tetikle / temizle |
+| `GET /api/sim/scenarios` · `POST /api/sim/scenario` · `DELETE /api/sim/scenarios` | Senaryo listele / tetikle / temizle. Senaryo desteklemeyen kaynakta (canlı mod) tetikleme **409** döner |
 | `WS /ws` | Canlı metrik / uyarı / aksiyon / rapor akışı |
 
 ---
@@ -334,6 +351,48 @@ NTC_AI__MODEL=llama3.2  NTC_API__PORT=9000  python -m ntc serve
 
 ---
 
+## Ölçümler
+
+Buradaki her satır çalıştırılmış bir ölçüme dayanıyor; tahmin yok.
+
+| Ne | Sonuç |
+|---|---|
+| **Optimizasyon kazancı** (220 Mbps talep, 100 Mbps'lik bacaklar) | tek hat 100 Mbps (%45) → iki hat 200 Mbps (%91) = **x2.00** |
+| Aynı ölçüm, 12 rastgele mimaride | ortalama **x1.34**, en yüksek x1.63, tek çıkışlı ağlarda dürüstçe x1.00 |
+| **AI akış tahsisi**, 20 rastgele mimari | 19'unda tam cevap, LP'ye göre kayıp **0.0 Mbps**, akışın %54–89'u modelin kararı |
+| **Sınıflandırma doğruluğu**, 8 tohum / 15.070 akış | IP tablosu yokken **%97.4**, eksik tabloyla **%98.3** |
+| **Talep tahmini** (gerçeği bilinen kurgu) | toplam mutlak hata 200.0 → **0.0 Mbps** |
+| **İnfaz** (tıkanma senaryosu, linux sürücüsü) | onaysızken **0** kısan kural; onaydan sonra 1 kural / 2 komut; ikinci turda **0 komut** (fark yok) |
+| **Canlı yakalama** (gerçek ağ, yönetici hakkı olmadan) | 111 akış / 577 paket; süreç adı çözülme soğuk başlangıçta %70, sürekli yoklamada **%95.5** |
+| **Panel** | 16/16 kart dolu, **0 JS hatası**; erişilebilirlik ve renk körlüğü denetiminden geçti |
+| **Testler** | çevrimdışı **32/32** (193 sn) + yerel model gerektiren **15/15** |
+
+---
+
+## Neyin doğrulanmadığı
+
+Bu bölüm bilerek var: doğrulanmamış bir şeyi "çalışıyor" diye saymak, projenin
+kendi kuralına aykırı.
+
+- 🔴 **Canlı modda topoloji hâlâ kurgu.** Paketler gerçek, ama çözücünün
+  üzerinde çalıştığı grafik `config.yaml`'daki üretilmiş ağ. Gerçek topoloji ve
+  kapasite yazılmadan canlı moddaki darboğaz çıktısı okunmamalı.
+- 🔴 **Canlı mod tek makineden bakıyor.** Ağdaki öteki cihazların trafiği
+  görünmüyor; bunun için yansıtma (SPAN) portu ya da cihaz başına ajan gerekir.
+- 🔴 **İnfaz gerçek cihazda denenmedi.** Üretilen komutların *metni* test
+  edildi, cihazdaki davranışı edilmedi.
+- ⚠️ **`rtt` ve yeniden gönderim canlıda ölçülmüyor** (paket sayaçlarından
+  çıkarılamaz, uydurulmuyor) → hat *kalitesi* kuralları canlı modda kör; hat
+  *doluluğu* kuralları çalışıyor.
+- ⚠️ **Canlı sınıflandırmanın isabeti ölçülmedi** — karşılaştırılacak doğru
+  etiket yok. Yukarıdaki %97–98 simülasyona karşı ölçüldü.
+- ⚠️ **Windows'ta yol kararı uygulanamıyor:** RRAS politika tabanlı yönlendirme
+  yapmıyor. Uygulama-farkında yönlendirme saf Windows'ta vaat edilemez.
+- ⚠️ **Domain gerektiren hiçbir şey test edilmedi** (AD kimlik, NPS/802.1X, GPO
+  ile dağıtım) — geliştirme makinesi Windows 11 Home.
+
+---
+
 ## Yol haritası
 
 - [x] **Faz 1 — Trafik izleme + kural motoru**
@@ -343,11 +402,23 @@ NTC_AI__MODEL=llama3.2  NTC_API__PORT=9000  python -m ntc serve
       cihaz üzerinde doğrulanana kadar bağlanmayacak.
 - [x] **Akış kaynağı soyutlaması** — `FlowSource` protokolü; `mode` ayarı
       kaynağı gerçekten seçiyor, bilinmeyen değerde açılışta hata veriyor.
-      Canlı kaynağın yeri açıldı, kendisi Faz 2'de.
-- [ ] **Faz 2 — Canlı mod:** Sysmon (Event 3/22/1) ve/veya ETW ile gerçek
-      telemetri; `LiveSource` simülatörün yerine aynı arayüzden geçer
+- [x] **Faz 2 — Canlı yakalama:** `LiveSource` gerçek trafiği akışlara
+      çeviriyor. Hacim paket yakalamadan (Npcap/scapy), süreç kimliği bağlantı
+      tablosundan (`psutil`) geliyor ve 5'li üzerinden birleşiyor — Windows'ta
+      ikisini tek kaynaktan almak mümkün değil (Sysmon bağlantı olayında bayt
+      alanı yok, yakalamada süreç yok).
+
+**Sıradaki üç iş — bunlar bitmeden canlı moddaki çıktılar yorumlanmamalı:**
+
+- [ ] **Gerçek topoloji ve kapasite** — canlı modda çözücü hâlâ üretilmiş bir
+      grafik üzerinde çalışıyor
+- [ ] **Çok cihazlı görünürlük** — yansıtma portu ya da cihaz başına ajan
+- [ ] **İnfazın gerçek cihazda doğrulanması** — sanal makinede Linux router
+
+**Sonraki fazlar:**
+
 - [ ] **Faz 3 — Akıllı firewall:** kural motoru + LLM'in trafik bağlamına bakıp
-      dinamik kural üretmesi; kurallar önce "gölge modda" değerlendirilir
+      dinamik kural üretmesi; kurallar önce gölge modda değerlendirilir
 - [ ] **Faz 4 — Honeypot + deception:** sahte servisler, tarama yapanları
       yakalama, API davranışını yoklayanlara tutarlı sahte HTTP yanıtları
 - [ ] **Faz 5 — Endpoint agent'ları:** cihazlara dağıtılan ajanlar, süreç ve
@@ -357,7 +428,8 @@ NTC_AI__MODEL=llama3.2  NTC_API__PORT=9000  python -m ntc serve
 
 ## Kapsam ve sorumluluk
 
-Bu araç, **yönetim yetkisine sahip olduğun** ağlar için tasarlandı. Faz 2 ile
-gerçek trafik yakalama ve firewall kuralı yazma devreye girdiğinde, çalıştırdığın
-ağın sahibi ya da yetkilendirilmiş yöneticisi olduğundan emin ol. Varsayılan mod
-`simulation`'dır ve hiçbir gerçek arayüze dokunmaz.
+Bu araç, **yönetim yetkisine sahip olduğun** ağlar için tasarlandı. `mode: live`
+gerçek paketleri yakalar — çalıştırdığın ağın sahibi ya da yetkilendirilmiş
+yöneticisi olduğundan emin ol. Varsayılan mod `simulation`'dır ve hiçbir gerçek
+arayüze dokunmaz; infaz da varsayılan olarak gölge modda, yani hiçbir komut
+çalıştırılmaz.

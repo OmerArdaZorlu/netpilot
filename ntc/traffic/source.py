@@ -52,6 +52,13 @@ class FlowSource(Protocol):
     devices: dict[str, Device]
     #: Senaryo tetikleme yeteneği var mı (bkz. modül açıklaması).
     supports_scenarios: bool
+    #: Kaynak akışın `traffic_class` alanını **doğru** dolduruyor mu.
+    #: Simülatör dolduruyor (akışı kendisi ürettiği için bilir), canlı kaynak
+    #: dolduramaz — kabloda öyle bir alan yok. Kontrolcü buna bakıp
+    #: sınıflandırıcıyı doğru moda alıyor: etiketlemeyen kaynakta gölge modda
+    #: kalmak, bütün trafiği varsayılan sınıfta bırakmak demek olurdu ve
+    #: önceliklendirme sessizce anlamsızlaşırdı.
+    labels_traffic_class: bool
 
     def tick(self, dt: float = 1.0) -> list[Flow]:
         """Son `dt` saniyeye ait akışları döndürür."""
@@ -70,6 +77,12 @@ class UnsupportedMode(RuntimeError):
     """`mode` tanınmıyor ya da o kaynağın kodu henüz yok."""
 
 
+def _bos_live():
+    """`live:` bloğu yazılmamışsa varsayılan ayarlar."""
+    from ..core.config import LiveConfig
+    return LiveConfig()
+
+
 def build_source(cfg: "Config") -> FlowSource:
     """`cfg.mode`'a göre akış kaynağını kurar.
 
@@ -84,13 +97,8 @@ def build_source(cfg: "Config") -> FlowSource:
         return TrafficSimulator()
 
     if mode in LIVE_MODES:
-        # Faz 2. Kodu yazılana kadar burada durup gerekçe veriyoruz;
-        # sessizce simülatöre düşmek en kötü seçenek olurdu.
-        raise UnsupportedMode(
-            "mode: live henüz uygulanmadı (Faz 2 — Sysmon/ETW telemetrisi). "
-            "Şu an tek çalışan kaynak simülatör: config.yaml içinde "
-            "mode: simulation yazın."
-        )
+        from .live import LiveSource
+        return LiveSource(getattr(cfg, "live", None) or _bos_live())
 
     raise UnsupportedMode(
         f"Bilinmeyen mode: {cfg.mode!r}. Geçerli değerler: "

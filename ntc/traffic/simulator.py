@@ -83,6 +83,9 @@ class TrafficSimulator:
     name = "simulation"
     #: Senaryolar üretilmiş trafiğe ait bir yetenek (bkz. `source.py`).
     supports_scenarios = True
+    #: Akışı kendisi ürettiği için sınıfını biliyor — sınıflandırıcının
+    #: ölçebileceği tek yer burası.
+    labels_traffic_class = True
 
     def __init__(self, seed: int | None = None) -> None:
         self.rng = random.Random(seed)
