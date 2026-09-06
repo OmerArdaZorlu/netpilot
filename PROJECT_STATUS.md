@@ -2135,13 +2135,33 @@ bir borç listesi yapılmış işi yeniden yaptırır; bu yüzden madde kapanın
 bir iddia değil, `python tests/kos.py` ile tekrarlanabilir bir ölçüm.)*
 
 ```
-python tests/kos.py            33/33 GECTI    205 sn
-python tests/kos.py --servis   15/15 GECTI   1397 sn  (yerel model gerektirir)
+python tests/kos.py            33/33 GECTI    205 sn  (2026-09-06)
+python tests/kos.py --servis   13/15         2968 sn  (2026-09-06, bkz. asagi)
+                               15/15 GECTI   1397 sn  (2026-08-26)
 
 derleme · panel JS · AST taramasi                      temiz
 16 API ucu + WebSocket, yuk altinda                    200
 AI cagrilari yuk altinda                               0 x 500
 ```
+
+⚠️ **Koşucunun süre tavanı, yavaş koşuda geçen testi düşmüş gösteriyor.**
+2026-09-06 servis koşusunda `t_ai_tekrar` ve `t_json_hata` "KALDI" çıktı.
+İkisi de gerçekte geçiyor — tek tek, tavansız koşturuldu: **237 sn** ve
+**277 sn**, ikisi de sıfır kodla ve `t_json_hata` 25/25 temiz.
+
+Sebep: `kos.py` her teste **420 sn** sabit tavan koyuyor (`ZAMAN_ASIMI`), ama
+model kullanan testin süresi koda değil **modelin o anki hızına** bağlı. O
+koşuda makine iki kat yavaştı (2968 sn / referans 1397 sn) ve normalde
+~250 sn süren iki test tavanı aştı. Kod değişmedi, sonuç değişti.
+
+**✅ Düzeltildi (2026-09-06).** Tavan ikiye ayrıldı: `ZAMAN_ASIMI = 420`
+(çevrimdışı testler), `ZAMAN_ASIMI_SERVIS = 900` (model gerektirenler —
+ölçülen normal sürenin ~3.5 katı). Gerçekten takılan test hâlâ kesiliyor,
+yavaş koşan test kesilmiyor. Zaman aşımı mesajı da artık "kontroller
+düşmedi, önce tek başına koştur" diye açıkça yazıyor.
+
+**Bunu okuyan için:** servis koşusunda "KALDI" gören önce testi tek başına
+koştursun. Tavan bir *takılma* nöbetçisi, süre ölçüsü değil.
 
 Varsayılan koşudakiler (33): `t_actions t_api t_bosluk t_classify
 t_classify_sweep t_classify_tohum t_cvd t_cvd_ara t_cvd_dogrula t_cvd_olc

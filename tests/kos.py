@@ -57,9 +57,21 @@ SERVIS_GEREKTIREN = {
     "t_hedef", "t_json_hata", "t_kesilme", "t_rows", "t_zincir",
 }
 
-# Tek koşuda beklenenden uzun sürenler için tavan (saniye). Çok turlu AI
+# Tavan (saniye) — **takılma nöbetçisi**, süre ölçüsü değil. Çok turlu AI
 # testleri 75 sn'de kesiliyordu, o yüzden geniş.
 ZAMAN_ASIMI = 420
+
+# Model kullanan testler ayrı tavanda ve sebebi ölçüldü (2026-09-06):
+# bu testlerin süresi koda değil **modelin o anki hızına** bağlı. Yavaş bir
+# koşuda (2968 sn / referans 1397 sn) normalde ~250 sn süren `t_ai_tekrar`
+# ve `t_json_hata` 420 sn'yi aşıp "KALDI" raporlandı; ikisi de tek başına
+# koşturulunca 237 ve 277 sn'de sıfır kodla geçti.
+#
+# Yani tavan, kod bozulmadan hız dalgalanmasını arıza gibi gösteriyordu ve
+# bir kez boşuna hata avına yol açtı. Servis tavanı normal sürenin ~3.5
+# katına çekildi: gerçekten takılan test hâlâ kesiliyor, yavaş koşan test
+# artık kesilmiyor.
+ZAMAN_ASIMI_SERVIS = 900
 
 
 def testleri_bul(desen: str | None) -> list[Path]:
@@ -71,17 +83,24 @@ def testleri_bul(desen: str | None) -> list[Path]:
 
 def kos(test: Path) -> tuple[int, float, str]:
     ortam = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
+    tavan = (ZAMAN_ASIMI_SERVIS if test.stem in SERVIS_GEREKTIREN
+             else ZAMAN_ASIMI)
     t0 = time.time()
     try:
         p = subprocess.run(
             [sys.executable, str(test)], cwd=str(KOK), env=ortam,
             capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=ZAMAN_ASIMI)
+            errors="replace", timeout=tavan)
         kod = p.returncode
         cikti = (p.stdout or "") + (p.stderr or "")
     except subprocess.TimeoutExpired as e:
         kod = -9
-        cikti = f"ZAMAN ASIMI ({ZAMAN_ASIMI} sn)\n" + (e.stdout or "")
+        # Tavana takılmak "test düştü" demek değil: yavaş bir koşuda geçen
+        # test de buraya düşebiliyor. Gerekçe raporda açıkça yazsın ki
+        # okuyan önce testi tek başına koştursun.
+        cikti = (f"ZAMAN ASIMI ({tavan:.0f} sn) — test kesildi, kontrolleri "
+                 "dusmedi. Once tek basina kostur: "
+                 f"python tests/{test.name}\n") + (e.stdout or "")
     return kod, time.time() - t0, cikti
 
 
