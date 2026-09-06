@@ -3,7 +3,7 @@
 > **Bu dosya oturumlar arası hafızadır.** Yeni bir oturuma başlarken önce burayı
 > oku, sonra devam et. Bir iş bitince veya bir karar değişince burayı güncelle.
 
-**Son güncelleme:** 2026-08-26
+**Son güncelleme:** 2026-09-06
 **Repo:** https://github.com/OmerArdaZorlu/netpilot
 **Paket adı:** `ntc` (repo adı `netpilot` ile kasıtlı olarak farklı — içeride
 onlarca `from ntc...` import var, değiştirmek gereksiz kırılganlık)
@@ -26,7 +26,8 @@ FlowSource → Metrics → (Optimizer ‖ AI Analyst) → Controller → API + P
 | Olay yolu | `ntc/core/bus.py` | ✅ async pub/sub |
 | Uygulama/cihaz katalogu | `ntc/traffic/catalog.py` | ✅ 16 uygulama, 10 cihaz profili |
 | Akış kaynağı | `ntc/traffic/source.py` | ✅ `FlowSource` protokolü; `mode` kaynağı gerçekten seçiyor, bilinmeyende hata veriyor |
-| Canlı kaynak | `ntc/traffic/capture.py` + `live.py` | ✅ Faz 2: yakalama ⋈ bağlantı tablosu; gerçek ağda ölçüldü (süreç çözülme %70). Yansıtma portu ve yönetici hakkı doğrulanmadı |
+| Canlı kaynak | `ntc/traffic/capture.py` + `live.py` | ✅ Faz 2: yakalama ⋈ kimlik; gerçek ağda ölçüldü (süreç çözülme %70, yalnız bağlantı tablosuyla). Yansıtma portu ve yönetici hakkı doğrulanmadı |
+| Sysmon telemetrisi | `ntc/traffic/sysmon.py` | ⚠️ yazıldı, birim testlerinden geçti (Event 3 + 22, artımlı okuma, yoklama iş parçacığı). **Gerçek Sysmon kurulu değil** — uçtan uca ölçülmedi |
 | Trafik üreteci | `ntc/traffic/simulator.py` | ✅ 6 senaryo tetiklenebilir |
 | Metrikler | `ntc/traffic/metrics.py` | ✅ kayan pencere, WAN/LAN ayrı |
 | Optimizasyon motoru | `ntc/traffic/optimizer.py` | ✅ 5 kural, politika defteri, uyarı soğutma |
@@ -47,7 +48,7 @@ FlowSource → Metrics → (Optimizer ‖ AI Analyst) → Controller → API + P
 | API + WebSocket | `ntc/api/server.py` | ✅ |
 | Panel | `ntc/dashboard/index.html` | ✅ görsel + erişilebilirlik + renk körlüğü denetiminden geçti (12 kusur düzeltildi); 2026-08-26'da gerçek `serve` üzerinde uçtan uca çalıştırıldı |
 | CLI | `ntc/cli.py` | ✅ serve / watch / analyze / ask / doctor |
-| Testler | `tests/` (47 dosya) | ✅ depoya alındı; `python tests/kos.py` → 32/32 |
+| Testler | `tests/` (48 dosya) | ✅ depoya alındı; `python tests/kos.py` → 33/33 |
 
 ### Çalıştırma
 
@@ -239,11 +240,53 @@ Server 2025 Evaluation (ücretsiz, 180 gün) / Azure VM / Win11 Pro yükseltme.
    sınanabiliyor ve şu an başarısız (bkz. Teknik borç). Bunu düzeltmeden
    eklenecek her AI özelliği aynı zemine oturur.
 
-1. **Sysmon telemetrisi**
-   Event ID 3 (ağ bağlantısı + süreç), 22 (DNS), 1 (süreç oluşumu) okuyup
-   simülatörün yerine gerçek akış koymak. Kullanıcının "cihazlara agent"
-   maddesinin büyük kısmını karşılıyor ve diğer her modülü gerçek veriyle
-   besliyor. Domain gerektirmiyor.
+1. **⚠️ Sysmon telemetrisi — yazıldı, gerçek Sysmon'la ölçülmedi** *(2026-09-06)*
+
+   `ntc/traffic/sysmon.py`. Kimlik beslemesini yoklamadan **olay akışına**
+   taşıyor: bağlantı tablosu saniyede bir bakıp o an *açık* soketleri
+   görüyor, iki yoklama arasında doğup ölen bağlantıyı (DNS, tek istek,
+   kimlik doğrulama turu) hiç göremiyor. Ölçülen tavan buydu: %70.
+   Sysmon Event 3 bağlantı **kurulduğu anda** yazılıyor.
+
+   | Ne | Nasıl |
+   |---|---|
+   | Event 3 → 5'li + PID + Image | `SysmonOwners`, `live.ConnectionOwners` ile **aynı sözleşme** |
+   | Event 22 → sorulan ad ⋈ dönen IP | `dns_ad(ip)`; şu an yalnız raporlanıyor |
+   | Artımlı okuma | `EventRecordID` imleci; zaman değil (saat geri alınabiliyor) |
+   | Erişim yoksa | `auto` gerekçesini yazıp tabloya düşüyor, `on` açılışta hata veriyor |
+
+   **Yer değiştirme değil üst üste koyma** (`BirlesikSahipler`). İki besleme
+   farklı şeyleri kaçırıyor: yoklama kısa ömürlüyü, Sysmon ise **açılıştan
+   önce kurulmuş** uzun bağlantıları (günlükte yalnız kurulum anı var).
+   Yalnız Sysmon'a geçseydik ikincisini kaybederdik. `by_sysmon` / `by_table`
+   sayaçları hangi beslemenin kaç akış çözdüğünü ayırıyor — "Sysmon kurulunca
+   %70'ten kaça çıktı" ölçülebilsin diye.
+
+   **Yoklama kendi iş parçacığında.** `wevtutil` turu bu makinede **~130 ms**
+   ve toplayıcı `tick()` olay döngüsünün üzerinde koşuyor; doğrudan çağırmak
+   her saniye 130 ms boyunca API'yi ve diğer dört döngüyü durdururdu (akış
+   çözücüsünün `asyncio.to_thread`'e alınmasıyla aynı gerekçe).
+
+   **Event 1 (süreç oluşumu) okunmuyor:** Event 3 zaten `Image` taşıyor, yani
+   trafik tarafında getirisi yok. Süreç ağacı ve komut satırı Faz 7'nin işi.
+
+   **Gerçek günlükte bir kusur yakalandı ve düzeltildi.** XPath'i
+   `EventRecordID&gt;N` diye yazmak yalnız sorgu bir XML dosyasına gömülünce
+   doğru; komut satırı argümanı olarak wevtutil `&gt;`'i olduğu gibi okuyup
+   **kod 15001** ile düşüyor. Taklit test bunu göremezdi — `System` kanalına
+   karşı koşturulunca çıktı. Testte artık nöbetçisi var.
+
+   **Doğrulama durumu:** `tests/t_sysmon.py` 60+ kontrol (ayrıştırma, kesik
+   XML, imleç, TTL, yön kararı, DNS, iş parçacığı, birleşim). Ayrıştırıcı ve
+   artımlı okuma **gerçek `wevtutil`** ile `System` kanalına karşı da
+   koşturuldu. `capture.py`'ın ürettiği anahtarla eşleştiği ayrıca test
+   ediliyor — tutmasaydı besleme dolu görünüp birleşim sessizce boş kalırdı.
+
+   🔴 **Ölçülmeyen:** gerçek Sysmon Event 3'ün kendisi. Sysmon bu makinede
+   kurulu değil (`sysmon64 -accepteula -i`, yönetici gerekiyor). Kurulmadan
+   önce "süreç çözülme %70'ten şu kadara çıktı" **iddia edilemez**.
+   Kurulunca ölçüm: `mode: live` ile birkaç dakika koştur,
+   `/api/status` → `live.owners.by_sysmon` / `by_table` / `hit_rate`.
 
 2. **Defender Firewall entegrasyonu, gölge modda**
    `NetSecurity` modülü mevcut (v2.0.0.0). Kurallar devre dışı/log-only üretilir.
@@ -2040,7 +2083,10 @@ bir borç listesi yapılmış işi yeniden yaptırır; bu yüzden madde kapanın
   trafiğini görüyor; ağın tamamını görmek için yansıtma (SPAN) portu ya da
   cihaz başına ajan gerekiyor — ikisi de doğrulanmadı.
 - **Süreç çözülme %70.** Kalan kayıp yoklama arasında doğup ölen kısa
-  ömürlü bağlantılar; Sysmon Event 3 (olay tabanlı) tam bu boşluğu kapatır.
+  ömürlü bağlantılar. Sysmon katmanı yazıldı (Faz 2 sonrası, madde 1) ama
+  **Sysmon kurulu olmadığı için kazancı ölçülmedi**; canlı koşuda besleme
+  gerekçesiyle kapanıyor ve oran hâlâ tablodan geliyor (son ölçüm %82,4,
+  6 saniyelik kısa koşu).
 - **`rtt_ms` / `retransmits` canlıda 0.** Hat *kalitesi* kuralları canlı
   modda kör; hat *doluluğu* kuralları çalışıyor.
 
@@ -2059,7 +2105,18 @@ bir borç listesi yapılmış işi yeniden yaptırır; bu yüzden madde kapanın
   karşılaştırılacak doğru etiket olmadığı için isabeti ölçülemiyor — ancak
   elle etiketlenmiş bir örneklemle ölçülebilir.
 
+- **Sysmon katmanı gerçek olayla denenmedi.** Ayrıştırma ve artımlı okuma
+  gerçek `wevtutil` ile (`System` kanalı) doğrulandı, ama Event 3'ün kendisi
+  hiç görülmedi: alan adları, `Initiated` davranışı ve olay hacmi kurulumdan
+  sonra teyit edilmeli. Kurulum yönetici hakkı istiyor.
+
 **Küçük, bloklamayan borçlar:**
+
+- **DNS eşlemesi toplanıyor ama kullanılmıyor** (Event 22). `dns_ad(ip)`
+  hazır; sınıflandırıcıya bağlamak için katalogda **alan adı tablosu yok**
+  (şu an yalnız süreç / IP bloğu / port / şekil katmanları var). Bağlanınca
+  isabetin ölçümü de ayrıca yapılmalı — canlıda doğru etiket olmadığı için
+  elle etiketlenmiş örneklem gerekiyor.
 
 - **AI payı `MAX_ROWS`=10 ile tavanlı** (4j/4k): canlıda 54 talebin 10'u modele
   gidiyor, akışın %38'i. Denenmemiş kaldıraç: modele 10'ar 10'ar birkaç turda
@@ -2078,7 +2135,7 @@ bir borç listesi yapılmış işi yeniden yaptırır; bu yüzden madde kapanın
 bir iddia değil, `python tests/kos.py` ile tekrarlanabilir bir ölçüm.)*
 
 ```
-python tests/kos.py            32/32 GECTI    240 sn
+python tests/kos.py            33/33 GECTI    205 sn
 python tests/kos.py --servis   15/15 GECTI   1397 sn  (yerel model gerektirir)
 
 derleme · panel JS · AST taramasi                      temiz
@@ -2086,11 +2143,11 @@ derleme · panel JS · AST taramasi                      temiz
 AI cagrilari yuk altinda                               0 x 500
 ```
 
-Varsayılan koşudakiler (32): `t_actions t_api t_bosluk t_classify
+Varsayılan koşudakiler (33): `t_actions t_api t_bosluk t_classify
 t_classify_sweep t_classify_tohum t_cvd t_cvd_ara t_cvd_dogrula t_cvd_olc
 t_demand t_enforce t_enforce_scope t_floors t_floors_shape t_flowopt
 t_hedef_birim t_json t_kaynak t_kazanc t_kurtarma t_live t_mix t_optimallik
-t_parse t_path t_policy t_random_topo t_sabitler t_sev2 t_snap t_targets`
+t_parse t_path t_policy t_random_topo t_sabitler t_sev2 t_snap t_sysmon t_targets`
 
 Model gerektirenler (15): `t_ai_diag t_ai_flow t_ai_flow2 t_ai_ham
 t_ai_hibrit t_ai_policy t_ai_politika t_ai_random t_ai_tekrar t_ai_yeni

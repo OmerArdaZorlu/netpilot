@@ -37,6 +37,28 @@ async def cmd_doctor(args) -> int:
     console.print(f"[bold]Veritabanı[/]    {cfg.storage.resolved_path()}")
     console.print(f"[bold]API[/]           http://{cfg.api.host}:{cfg.api.port}")
 
+    # Sysmon yalnız canlı modda kullanılıyor; simülasyonda sormanın anlamı yok
+    # ve her `doctor` çağrısına gereksiz bir `wevtutil` turu eklerdi.
+    if cfg.mode == "live":
+        from .traffic.sysmon import sysmon_durumu
+        if cfg.live.sysmon == "off":
+            console.print("[bold]Sysmon[/]        kapalı (live.sysmon: off)")
+        else:
+            durum = sysmon_durumu(cfg.live.sysmon_channel)
+            if durum["readable"] and durum["recent_events"]:
+                console.print(f"[bold]Sysmon[/]        [green]okunuyor[/] — son olay "
+                              f"{durum.get('last_event_age_s', '?')} sn önce")
+            elif durum["readable"]:
+                console.print(f"[bold]Sysmon[/]        [yellow]kanal var, olay yok[/] — "
+                              f"{durum['reason']}")
+            else:
+                # wevtutil gerekçeyi birkaç satıra yayıyor; `doctor` çıktısı
+                # taranarak okunuyor, ilk satır yeterli. Tamamı log'da.
+                kisa = (durum["reason"] or "").splitlines()[0].strip()
+                console.print(f"[bold]Sysmon[/]        [yellow]yok[/] — {kisa}")
+                console.print("                Kurulum (yönetici): [bold]sysmon64 -accepteula -i[/]")
+                console.print("                Süreç çözülme Sysmon'suz %70 tavanında kalıyor")
+
     provider = await create_provider(cfg.ai)
     health = await provider.health()
     await provider.aclose()

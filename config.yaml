@@ -33,6 +33,23 @@ live:
   # tabanlı olduğu için o boşluğu kapatır.
   owner_poll_seconds: 1.0
   owner_ttl_seconds: 120.0
+  # Sysmon kimlik beslemesi (Event 3 = bağlantı + süreç, Event 22 = DNS).
+  # Bağlantı tablosunun yerine değil **üstüne** biniyor: yoklama kısa ömürlü
+  # bağlantıyı göremiyor, Sysmon ise yalnız kurulum anını yazıyor — açılıştan
+  # önce kurulmuş uzun bağlantıları tablo taşıyor. Hangisinin kaç akış
+  # çözdüğü `/api/status` → live.owners.by_sysmon / by_table alanlarında.
+  #   auto — okunabiliyorsa kullan, okunamıyorsa gerekçesini yazıp devam et
+  #   on   — zorunlu; okunamıyorsa açılışta gerekçeli hata
+  #   off  — hiç deneme
+  # Kurulum (yönetici): sysmon64 -accepteula -i
+  # Yoklama kendi iş parçacığında koşuyor: `wevtutil` turu ~130 ms ve
+  # toplayıcı olay döngüsünün üzerinde.
+  sysmon: auto
+  sysmon_channel: "Microsoft-Windows-Sysmon/Operational"
+  sysmon_batch: 500
+  # İlk yoklamada geriye dönük okunan olay. 0 olsaydı açılışın ilk saniyeleri
+  # sistematik olarak sahipsiz akış üretirdi: hacim akıyor, sahibi yok.
+  sysmon_backfill: 200
 
 # Hat kapasitesi. ⚠️ Bir `topology:` bloğu varsa bu değerler **oradan
 # türetiliyor** ve buradakiler yok sayılıyor — panel doluluğu ile çözücünün

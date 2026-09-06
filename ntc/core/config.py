@@ -189,6 +189,19 @@ class LiveConfig:
     # onların sahibini kaybederdik.
     owner_poll_seconds: float = 1.0
     owner_ttl_seconds: float = 120.0
+    # Sysmon kimlik beslemesi: auto | on | off.
+    #   auto — günlük okunabiliyorsa kullan, okunamıyorsa gerekçesini yazıp
+    #          bağlantı tablosuyla devam et (varsayılan)
+    #   on   — zorunlu; okunamıyorsa açılışta gerekçeli hata. "Sysmon açık"
+    #          sanıp sessizce tabloya düşmüş bir kurulum ölçümü yalanlar
+    #   off  — hiç deneme (Sysmon kurulu değilken gereksiz yoklamayı keser)
+    sysmon: str = "auto"
+    sysmon_channel: str = "Microsoft-Windows-Sysmon/Operational"
+    # Tek yoklamada alınacak azami olay ve ilk yoklamada geriye dönük okunan
+    # olay sayısı. Geriye dönük okuma olmadan açılışın ilk saniyeleri
+    # sistematik olarak sahipsiz akış üretiyor.
+    sysmon_batch: int = 500
+    sysmon_backfill: int = 200
 
 
 @dataclass

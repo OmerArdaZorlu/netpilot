@@ -13,8 +13,15 @@ hangisinin takılı olduğunu bilmiyor.
 
 Windows'ta bunları tek yerden alamıyoruz: Sysmon Event 3 bağlantıyı kimin
 açtığını söylüyor ama bayt alanı yok; yakalama baytı tam veriyor ama süreç
-yok. Sysmon ileride `ConnectionOwners`'ın yerine geçebilir — birleştirmenin
-şekli değişmez, yalnız kimlik beslemesinin kaynağı değişir.
+yok.
+
+**Kimlik beslemesi iki kaynaklı** (`BirlesikSahipler`): Sysmon varsa birincil,
+bağlantı tablosu her hâlükârda yedek. Yer değiştirme değil **üst üste koyma**,
+çünkü ikisi farklı şeyleri kaçırıyor: yoklama kısa ömürlü bağlantıyı
+göremiyor (ölçülen tavan %70), Sysmon ise yalnız **kurulum anını** yazıyor —
+bu makine açılmadan önce kurulmuş, hâlâ akan uzun bağlantılar günlüğün
+okunan penceresinde yok. Yalnız Sysmon'a geçseydik bu sefer onları
+kaybederdik.
 
 **Bilerek doldurulmayan alanlar.** `rtt_ms` ve `retransmits` **0** kalıyor:
 paket sayaçlarından ikisi de çıkarılamaz (RTT için el sıkışma/ACK eşlemesi,
@@ -46,6 +53,8 @@ from ..core.models import (
     now,
 )
 from .capture import CaptureUnavailable, PacketVolumeFeed, local_addresses
+from .sysmon import KANAL as SYSMON_KANAL
+from .sysmon import SysmonOwners, SysmonReader, SysmonUnavailable
 
 log = logging.getLogger(__name__)
 
@@ -182,6 +191,75 @@ class ConnectionOwners:
         }
 
 
+class BirlesikSahipler:
+    """İki kimlik beslemesini sırayla sorar: önce Sysmon, sonra tablo.
+
+    **Sıra ölçülebilirlikten geliyor, tercihten değil.** Sysmon olayı
+    bağlantının kurulduğu anı taşıyor ve 5'lisi tam; tablo yoklaması aynı
+    5'liyi kaçırmışsa zaten cevabı yok, kaçırmamışsa cevabı aynı. Yani sıra
+    isabeti düşürmüyor, yalnız hangi beslemenin katkı yaptığını ayırıyor —
+    `sysmon_hit` / `table_hit` sayaçları tam bunun için var: "Sysmon kurulunca
+    çözülme %70'ten kaça çıktı" sorusunu ölçüyle cevaplayabilelim.
+
+    Kendi `lookup()` çağrısı alt beslemelerin sayaçlarını da artırıyor; o
+    yüzden dışarıya **kendi** oranını veriyoruz, alt beslemelerinkini değil.
+    """
+
+    def __init__(self, tablo: "ConnectionOwners",
+                 sysmon: SysmonOwners | None = None) -> None:
+        self.tablo = tablo
+        self.sysmon = sysmon
+        self.sysmon_hit = 0
+        self.tablo_hit = 0
+        self.cozulemeyen = 0
+
+    def refresh(self, ts: float | None = None) -> int:
+        eklenen = self.tablo.refresh(ts)
+        # Sysmon kendi iş parçacığında yokluyorsa burada tekrar çağırmıyoruz:
+        # `wevtutil` turu ~130 ms ve bu çağrı olay döngüsünün üzerinde.
+        # İş parçacığı yoksa (test, `doctor`) senkron yol duruyor.
+        if self.sysmon is not None and not self.sysmon.calisiyor:
+            eklenen += self.sysmon.refresh(ts)
+        return eklenen
+
+    def lookup(self, proto: str, yerel_ip: str, yerel_port: int,
+               uzak_ip: str, uzak_port: int) -> tuple[int | None, str]:
+        if self.sysmon is not None:
+            pid, ad = self.sysmon.lookup(proto, yerel_ip, yerel_port,
+                                         uzak_ip, uzak_port)
+            if pid is not None:
+                self.sysmon_hit += 1
+                return pid, ad
+        pid, ad = self.tablo.lookup(proto, yerel_ip, yerel_port,
+                                    uzak_ip, uzak_port)
+        if pid is not None:
+            self.tablo_hit += 1
+            return pid, ad
+        self.cozulemeyen += 1
+        return None, BILINMEYEN_SUREC
+
+    def dns_ad(self, ip: str) -> str:
+        return self.sysmon.dns_ad(ip) if self.sysmon is not None else ""
+
+    @property
+    def hit_rate(self) -> float | None:
+        toplam = self.sysmon_hit + self.tablo_hit + self.cozulemeyen
+        return ((self.sysmon_hit + self.tablo_hit) / toplam) if toplam else None
+
+    def to_dict(self) -> dict[str, Any]:
+        d = {
+            "resolved": self.sysmon_hit + self.tablo_hit,
+            "unresolved": self.cozulemeyen,
+            "hit_rate": round(self.hit_rate, 3) if self.hit_rate is not None else None,
+            "by_sysmon": self.sysmon_hit,
+            "by_table": self.tablo_hit,
+            "table": self.tablo.to_dict(),
+        }
+        if self.sysmon is not None:
+            d["sysmon"] = self.sysmon.to_dict()
+        return d
+
+
 class LiveSource:
     """Gerçek trafikten `Flow` üreten kaynak (`FlowSource` sözleşmesi)."""
 
@@ -200,22 +278,58 @@ class LiveSource:
             promiscuous=bool(getattr(cfg, "promiscuous", False)),
             yerel_adresler=self._yerel,
         )
-        self.owners = ConnectionOwners(
+        self.tablo_sahipleri = ConnectionOwners(
             ttl=float(getattr(cfg, "owner_ttl_seconds", OWNER_TTL)))
+        self.sysmon_modu = str(getattr(cfg, "sysmon", "auto") or "auto").lower()
+        self.sysmon: SysmonOwners | None = None
+        if self.sysmon_modu in ("auto", "on"):
+            self.sysmon = SysmonOwners(
+                ttl=float(getattr(cfg, "owner_ttl_seconds", OWNER_TTL)),
+                yerel_adresler=self._yerel,
+                reader=SysmonReader(
+                    kanal=str(getattr(cfg, "sysmon_channel", "") or SYSMON_KANAL),
+                    batch=int(getattr(cfg, "sysmon_batch", 500)),
+                    ilk_geriye=int(getattr(cfg, "sysmon_backfill", 200))))
+        self.owners = BirlesikSahipler(self.tablo_sahipleri, self.sysmon)
         self._yoklama_araligi = float(getattr(cfg, "owner_poll_seconds", 1.0))
         self._son_yoklama = 0.0
         self._hostname = socket.gethostname()
         self.dusen_akis = 0
         self._sessizlik_bildirildi = False
+        self.sysmon_kapali_sebep = ""
 
     # ------------------------------------------------------------------ yaşam
 
     async def start(self) -> None:
         self.volume.start()
+        # Sysmon'u yakalamadan **sonra** yokluyoruz: günlük okunamıyorsa
+        # `auto` modda sessizce değil, gerekçesiyle kapanıyor. `on` modunda
+        # ise açılışta yüksek sesle düşüyor — "Sysmon açık" diyip aslında
+        # tabloya düşmüş bir kurulum, ölçümü sessizce yalanlardı.
+        if self.sysmon is not None and not self.sysmon.hazir():
+            sebep = self.sysmon.kapali_sebep
+            if self.sysmon_modu == "on":
+                raise SysmonUnavailable(
+                    "live.sysmon: on ama Sysmon günlüğü okunamıyor — " + sebep +
+                    ". Sysmon kurulu mu (`sysmon64 -accepteula -i`) ve bu "
+                    "kullanıcı günlüğü okuyabiliyor mu?")
+            log.warning("Sysmon kapalı, bağlantı tablosuyla devam ediliyor: %s",
+                        sebep)
+            self.sysmon_kapali_sebep = sebep
+            self.sysmon = None
+            self.owners.sysmon = None
+        if self.sysmon is not None:
+            # İlk yoklamayı burada, açılışta yapıyoruz: iş parçacığı zaten
+            # bunu yapacak ama ilk tur bitene kadar tablo boş olurdu ve
+            # açılışın ilk saniyeleri sistematik olarak sahipsiz akış üretirdi.
+            self.sysmon.refresh()
+            self.sysmon.start()
         self.owners.refresh()
 
     async def aclose(self) -> None:
         self.volume.aclose()
+        if self.sysmon is not None:
+            self.sysmon.aclose()
 
     # ------------------------------------------------------------------ cihaz
 
@@ -308,6 +422,9 @@ class LiveSource:
             "local_addresses": len(self._yerel),
             "devices": len(self.devices),
             "owners": self.owners.to_dict(),
+            "sysmon_mode": self.sysmon_modu,
+            "sysmon_active": self.sysmon is not None,
+            "sysmon_off_reason": self.sysmon_kapali_sebep,
         }
 
 
@@ -317,5 +434,5 @@ def build_live_source(cfg: Any) -> LiveSource:
     return kaynak
 
 
-__all__ = ["ConnectionOwners", "LiveSource", "CaptureUnavailable",
-           "build_live_source"]
+__all__ = ["BirlesikSahipler", "ConnectionOwners", "LiveSource",
+           "CaptureUnavailable", "SysmonUnavailable", "build_live_source"]
